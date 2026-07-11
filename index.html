@@ -58,16 +58,21 @@ const DEFAULT_PART_CATALOG = [
   { id: "harmony", label: "ハモリ", color: "#7B4FA3" },
   { id: "all", label: "全員", color: "#C97A2B" },
 ];
+// range型(選択範囲をマーカーのようにハイライトする): アクセント、ファルセットなど
 const DEFAULT_MARK_CATALOG = [
-  { id: "falsetto", label: "ファルセット", symbol: "Fal", color: "#8E7CC3" },
-  { id: "accent", label: "アクセント", symbol: ">", color: "#D9534F" },
-  { id: "strong", label: "強く歌う", symbol: "f", color: "#C0392B" },
-  { id: "weak", label: "弱く歌う", symbol: "p", color: "#5B9BD5" },
+  { id: "falsetto", label: "ファルセット", color: "#8E7CC3" },
+  { id: "accent", label: "アクセント", color: "#D9534F" },
+  { id: "strong", label: "強く歌う", color: "#C0392B" },
+  { id: "weak", label: "弱く歌う", color: "#5B9BD5" },
+];
+// point型(文字と文字の間に記号を挿入する): ブレス、ロングトーン、上げ下げなど
+const DEFAULT_POINT_CATALOG = [
+  { id: "breath", label: "ブレス", symbol: "V", color: "#3A8F5A" },
+  { id: "rise", label: "上がる", symbol: "↗", color: "#3C7FD6" },
+  { id: "fall", label: "下がる", symbol: "↘", color: "#3C7FD6" },
+  { id: "sustain", label: "ロングトーン(伸ばす)", symbol: "〜→", color: "#D68A3C" },
   { id: "vibrato", label: "ビブラート", symbol: "〜", color: "#8E7CC3" },
-  { id: "longtone", label: "ロングトーン", symbol: "—", color: "#4A7A5E" },
   { id: "cut", label: "音を切る", symbol: "×", color: "#7A7A7A" },
-  { id: "rise", label: "上げる", symbol: "↑", color: "#D68A3C" },
-  { id: "fall", label: "下げる", symbol: "↓", color: "#3C7FD6" },
 ];
 const DEFAULT_REACTION_TYPES = [
   { id: "thumbsup", emoji: "👍", label: "参考になった" },
@@ -178,7 +183,7 @@ async function migrateLegacyDataToFirestore(onProgress) {
     done += 1;
     if (onProgress) onProgress(done, legacyIndex.length);
   }
-  for (const key of ["part-catalog", "mark-catalog", "reaction-catalog"]) {
+  for (const key of ["part-catalog", "mark-catalog", "point-catalog", "reaction-catalog"]) {
     const items = await getLegacyCatalog(key);
     if (items) await saveCatalog(key, items);
   }
@@ -249,11 +254,12 @@ function getSelectionOffsets(container) {
   if (start == null || end == null || start === end) return null;
   return { start: Math.min(start, end), end: Math.max(start, end) };
 }
-function buildSegments(text, parts, marks) {
-  const points = new Set([0, text.length]);
-  (parts || []).forEach((p) => { points.add(p.start); points.add(p.end); });
-  (marks || []).forEach((m) => { points.add(m.start); points.add(m.end); });
-  const sorted = Array.from(points).filter((n) => n >= 0 && n <= text.length).sort((a, b) => a - b);
+function buildSegments(text, parts, marks, pointMarks) {
+  const breakpoints = new Set([0, text.length]);
+  (parts || []).forEach((p) => { breakpoints.add(p.start); breakpoints.add(p.end); });
+  (marks || []).forEach((m) => { breakpoints.add(m.start); breakpoints.add(m.end); });
+  (pointMarks || []).forEach((pt) => { breakpoints.add(pt.position); });
+  const sorted = Array.from(breakpoints).filter((n) => n >= 0 && n <= text.length).sort((a, b) => a - b);
   const segments = [];
   for (let i = 0; i < sorted.length - 1; i++) {
     const s = sorted[i], e = sorted[i + 1];
@@ -321,42 +327,84 @@ function PinInput(value, onChange) {
   });
 }
 
-function LyricsRenderer({ text, parts, marks, partCatalog, markCatalog, interactive, containerRef, onMouseUp }) {
-  const segments = useMemo(() => buildSegments(text || "", parts, marks), [text, parts, marks]);
-  return E("div", {
-    ref: containerRef, onMouseUp: interactive ? onMouseUp : undefined,
-    style: { fontFamily: FONT_M, color: C.inkText, fontSize: 14, lineHeight: 2.1, whiteSpace: "pre-wrap", userSelect: "text", cursor: interactive ? "text" : "default" },
-  }, segments.map((seg, i) => {
+function LyricsRenderer({ text, parts, marks, points, partCatalog, markCatalog, pointCatalog, interactive, containerRef, onMouseUp, onTouchEnd }) {
+  const segments = useMemo(() => buildSegments(text || "", parts, marks, points), [text, parts, marks, points]);
+  const pointsByPos = useMemo(() => {
+    const map = {};
+    (points || []).forEach((pt) => { (map[pt.position] = map[pt.position] || []).push(pt); });
+    return map;
+  }, [points]);
+  function renderPointsAt(pos) {
+    const list = pointsByPos[pos];
+    if (!list || list.length === 0) return null;
+    return list.map((pt) => {
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (!def) return null;
+      return E("span", {
+        key: pt.id, "data-annot-skip": "true", title: def.label,
+        style: { display: "inline-block", color: def.color, fontWeight: 700, fontSize: 12, margin: "0 2px", verticalAlign: "middle" },
+      }, def.symbol);
+    });
+  }
+  const nodes = [E(React.Fragment, { key: "pt-0" }, renderPointsAt(0))];
+  segments.forEach((seg, i) => {
     const partDef = seg.part ? (partCatalog || []).find((p) => p.id === seg.part.colorId) : null;
     const markDefs = (seg.marksHere || []).map((m) => (markCatalog || []).find((mc) => mc.id === m.typeId)).filter(Boolean);
-    return E("span", {
-      key: i,
-      style: { backgroundColor: partDef ? `${partDef.color}45` : "transparent", borderBottom: markDefs.length ? `2px solid ${markDefs[0].color}` : "none", borderRadius: 2 },
-    }, seg.text, markDefs.map((md, j) => E("sup", { key: j, "data-annot-skip": "true", title: md.label, style: { fontSize: 10, color: md.color, marginLeft: 1, fontWeight: 700 } }, md.symbol)));
-  }));
+    nodes.push(E("span", {
+      key: "seg-" + i,
+      title: markDefs.length ? markDefs.map((m) => m.label).join(" / ") : undefined,
+      style: {
+        color: partDef ? partDef.color : "inherit",
+        fontWeight: partDef ? 700 : 400,
+        backgroundColor: markDefs.length ? `${markDefs[0].color}4D` : "transparent",
+        borderRadius: 2,
+      },
+    }, seg.text));
+    nodes.push(E(React.Fragment, { key: "pt-" + seg.end }, renderPointsAt(seg.end)));
+  });
+  return E("div", {
+    ref: containerRef,
+    onMouseUp: interactive ? onMouseUp : undefined,
+    onTouchEnd: interactive ? onTouchEnd : undefined,
+    style: {
+      fontFamily: FONT_M, color: C.inkText, fontSize: 14, lineHeight: 2.1, whiteSpace: "pre-wrap",
+      userSelect: "text", WebkitUserSelect: "text", WebkitTouchCallout: "default",
+      cursor: interactive ? "text" : "default",
+    },
+  }, nodes);
 }
 
-function Legend({ parts, marks, partCatalog, markCatalog }) {
+function Legend({ parts, marks, points, partCatalog, markCatalog, pointCatalog }) {
   const usedPartIds = Array.from(new Set((parts || []).map((p) => p.colorId)));
   const usedMarkIds = Array.from(new Set((marks || []).map((m) => m.typeId)));
-  if (usedPartIds.length === 0 && usedMarkIds.length === 0) return null;
+  const usedPointIds = Array.from(new Set((points || []).map((p) => p.typeId)));
+  if (usedPartIds.length === 0 && usedMarkIds.length === 0 && usedPointIds.length === 0) return null;
   return E("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginTop: 16, paddingTop: 12, borderTop: `1px dashed ${C.paperLine}` } },
     usedPartIds.length > 0 && E("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
-      E("span", { style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060" } }, "パート:"),
+      E("span", { style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060" } }, "パート(文字色):"),
       usedPartIds.map((id) => {
         const p = (partCatalog || []).find((pc) => pc.id === id);
         if (!p) return null;
-        return E("span", { key: id, style: { display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_M, fontSize: 11, color: "#5A5138" } },
+        return E("span", { key: id, style: { display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_M, fontSize: 11, color: p.color, fontWeight: 700 } },
           E("span", { style: { width: 9, height: 9, borderRadius: 2, background: p.color, display: "inline-block" } }), p.label);
       })
     ),
     usedMarkIds.length > 0 && E("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
-      E("span", { style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060" } }, "記号:"),
+      E("span", { style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060" } }, "マーカー:"),
       usedMarkIds.map((id) => {
         const m = (markCatalog || []).find((mc) => mc.id === id);
         if (!m) return null;
         return E("span", { key: id, style: { display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_M, fontSize: 11, color: "#5A5138" } },
-          E("span", { style: { color: m.color, fontWeight: 700 } }, m.symbol), m.label);
+          E("span", { style: { width: 12, height: 12, borderRadius: 2, background: `${m.color}4D`, border: `1px solid ${m.color}`, display: "inline-block" } }), m.label);
+      })
+    ),
+    usedPointIds.length > 0 && E("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+      E("span", { style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060" } }, "記号:"),
+      usedPointIds.map((id) => {
+        const pt = (pointCatalog || []).find((pc) => pc.id === id);
+        if (!pt) return null;
+        return E("span", { key: id, style: { display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_M, fontSize: 11, color: "#5A5138" } },
+          E("span", { style: { color: pt.color, fontWeight: 700 } }, pt.symbol), pt.label);
       })
     )
   );
@@ -469,12 +517,17 @@ function LyricsArchive() {
 
   const [partCatalog, setPartCatalog] = useState(DEFAULT_PART_CATALOG);
   const [markCatalog, setMarkCatalog] = useState(DEFAULT_MARK_CATALOG);
+  const [pointCatalog, setPointCatalog] = useState(DEFAULT_POINT_CATALOG);
   const [reactionTypes, setReactionTypes] = useState(DEFAULT_REACTION_TYPES);
   const [catalogModal, setCatalogModal] = useState(null);
 
   const [draftParts, setDraftParts] = useState([]);
   const [draftMarks, setDraftMarks] = useState([]);
+  const [draftPoints, setDraftPoints] = useState([]);
   const [selRange, setSelRange] = useState(null);
+  const [selRect, setSelRect] = useState(null);
+  const [paintPart, setPaintPart] = useState(null);
+  const [pointInsertSide, setPointInsertSide] = useState("after");
   const annotateRef = useRef(null);
 
   const [reactionData, setReactionData] = useState({ counts: {}, users: {} });
@@ -504,6 +557,7 @@ function LyricsArchive() {
     refreshIndex();
     loadCatalog("part-catalog", DEFAULT_PART_CATALOG).then(setPartCatalog);
     loadCatalog("mark-catalog", DEFAULT_MARK_CATALOG).then(setMarkCatalog);
+    loadCatalog("point-catalog", DEFAULT_POINT_CATALOG).then(setPointCatalog);
     loadCatalog("reaction-catalog", DEFAULT_REACTION_TYPES).then(setReactionTypes);
     const unsub = fbAuth.onAuthStateChanged((fbUser) => {
       setUser(fbUser ? { id: fbUser.uid, name: fbUser.displayName || fbUser.email || "名無しさん", photoURL: fbUser.photoURL || null } : null);
@@ -530,6 +584,7 @@ function LyricsArchive() {
       await refreshIndex();
       loadCatalog("part-catalog", DEFAULT_PART_CATALOG).then(setPartCatalog);
       loadCatalog("mark-catalog", DEFAULT_MARK_CATALOG).then(setMarkCatalog);
+      loadCatalog("point-catalog", DEFAULT_POINT_CATALOG).then(setPointCatalog);
       loadCatalog("reaction-catalog", DEFAULT_REACTION_TYPES).then(setReactionTypes);
     } catch (e) {
       setMigrateMsg("⚠ 移行中にエラーが発生しました: " + e.message);
@@ -606,7 +661,8 @@ function LyricsArchive() {
   function cancelForm() { setMode(selectedSong ? "view" : "empty"); }
   function openAnnotate() {
     if (!selectedSong) return;
-    setDraftParts(selectedSong.parts || []); setDraftMarks(selectedSong.marks || []); setSelRange(null); setMode("annotate");
+    setDraftParts(selectedSong.parts || []); setDraftMarks(selectedSong.marks || []); setDraftPoints(selectedSong.points || []);
+    setSelRange(null); setSelRect(null); setPaintPart(null); setMode("annotate");
   }
 
   async function saveForm() {
@@ -619,7 +675,7 @@ function LyricsArchive() {
     try {
       if (mode === "new") {
         const id = newId();
-        const song = { id, title, artist, tags, lyrics, authorId: user.id, authorName: user.name, version: 1, lastEditorId: user.id, lastEditorName: user.name, parts: [], marks: [], refVideos: [], createdAt: now, updatedAt: now, history: [], reactionTotal: 0 };
+        const song = { id, title, artist, tags, lyrics, authorId: user.id, authorName: user.name, version: 1, lastEditorId: user.id, lastEditorName: user.name, parts: [], marks: [], points: [], refVideos: [], createdAt: now, updatedAt: now, history: [], reactionTotal: 0 };
         await setSong(song);
         await refreshIndex();
         setSelectedSong(song); setSelectedId(id); setReactionData({ counts: {}, users: {} }); setMode("view");
@@ -634,7 +690,7 @@ function LyricsArchive() {
           title, artist, tags, lyrics,
           authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name,
           version: (selectedSong.version || 1) + 1, lastEditorId: user.id, lastEditorName: user.name,
-          parts: textChanged ? [] : (selectedSong.parts || []), marks: textChanged ? [] : (selectedSong.marks || []),
+          parts: textChanged ? [] : (selectedSong.parts || []), marks: textChanged ? [] : (selectedSong.marks || []), points: textChanged ? [] : (selectedSong.points || []),
           updatedAt: now, history,
         });
         await setSong(updated);
@@ -654,26 +710,59 @@ function LyricsArchive() {
     setSelectedId(null); setSelectedSong(null); setMode("empty");
   }
 
-  function handleMouseUp() { setSelRange(getSelectionOffsets(annotateRef.current)); }
-  function applyPart(colorId) {
-    if (!selRange) return;
-    setDraftParts((prev) => prev.filter((p) => p.end <= selRange.start || p.start >= selRange.end).concat([{ id: newId(), start: selRange.start, end: selRange.end, colorId }]));
-    setSelRange(null); const s = window.getSelection(); if (s) s.removeAllRanges();
+  // 選択範囲の変化はselectionchangeで常時追従(フローティングツールバーの表示位置用)。
+  // マウス/タッチどちらでも動くようdocumentレベルで監視する。
+  useEffect(() => {
+    if (mode !== "annotate") { setSelRange(null); setSelRect(null); return; }
+    function onSelChange() {
+      const off = getSelectionOffsets(annotateRef.current);
+      if (!off) { setSelRange(null); setSelRect(null); return; }
+      setSelRange(off);
+      try {
+        const sel = window.getSelection();
+        const rect = sel.getRangeAt(0).getBoundingClientRect();
+        setSelRect({ top: rect.top, bottom: rect.bottom, left: rect.left, width: rect.width });
+      } catch (e) {}
+    }
+    document.addEventListener("selectionchange", onSelChange);
+    return () => document.removeEventListener("selectionchange", onSelChange);
+  }, [mode]);
+
+  function applyPart(colorId, rangeOverride) {
+    const r = rangeOverride || selRange;
+    if (!r) return;
+    setDraftParts((prev) => prev.filter((p) => p.end <= r.start || p.start >= r.end).concat([{ id: newId(), start: r.start, end: r.end, colorId }]));
+    const s = window.getSelection(); if (s) s.removeAllRanges();
+  }
+  // パート塗りモード中にドラッグを離した(=マウスアップ/タッチエンド)瞬間だけ確定させる。
+  // selectionchangeはドラッグ中も連発するため、そちらでは確定処理をしない(選択が中断されるのを防ぐ)。
+  function handlePointerCommit() {
+    if (!paintPart) return;
+    setTimeout(() => {
+      const off = getSelectionOffsets(annotateRef.current);
+      if (off) applyPart(paintPart, off);
+    }, 0);
   }
   function applyMark(typeId) {
     if (!selRange) return;
     setDraftMarks((prev) => prev.filter((m) => !(m.typeId === typeId && !(m.end <= selRange.start || m.start >= selRange.end))).concat([{ id: newId(), start: selRange.start, end: selRange.end, typeId }]));
-    setSelRange(null); const s = window.getSelection(); if (s) s.removeAllRanges();
+  }
+  function insertPoint(typeId) {
+    if (!selRange) return;
+    const position = pointInsertSide === "before" ? selRange.start : selRange.end;
+    setDraftPoints((prev) => prev.filter((pt) => !(pt.position === position && pt.typeId === typeId)).concat([{ id: newId(), position, typeId }]));
   }
   function clearSelection() {
     if (!selRange) return;
     setDraftParts((prev) => prev.filter((p) => p.end <= selRange.start || p.start >= selRange.end));
     setDraftMarks((prev) => prev.filter((m) => m.end <= selRange.start || m.start >= selRange.end));
-    setSelRange(null); const s = window.getSelection(); if (s) s.removeAllRanges();
+    setDraftPoints((prev) => prev.filter((pt) => pt.position < selRange.start || pt.position > selRange.end));
+    const s = window.getSelection(); if (s) s.removeAllRanges();
   }
+  function closeToolbar() { const s = window.getSelection(); if (s) s.removeAllRanges(); }
   async function saveAnnotations() {
     setSaving(true);
-    const updated = Object.assign({}, selectedSong, { parts: draftParts, marks: draftMarks, authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name, updatedAt: new Date().toISOString() });
+    const updated = Object.assign({}, selectedSong, { parts: draftParts, marks: draftMarks, points: draftPoints, authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name, updatedAt: new Date().toISOString() });
     await setSong(updated);
     await refreshIndex();
     setSelectedSong(updated); setMode("view"); setSaving(false);
@@ -713,24 +802,31 @@ function LyricsArchive() {
     setIndexState(list);
   }
 
+  function catalogStateFor(kind) {
+    if (kind === "part") return [partCatalog, setPartCatalog, "part-catalog"];
+    if (kind === "mark") return [markCatalog, setMarkCatalog, "mark-catalog"];
+    return [pointCatalog, setPointCatalog, "point-catalog"];
+  }
   function addCatalogItem(kind) {
-    const isPart = kind === "part";
-    const item = isPart ? { id: newId(), label: "新しいパート", color: "#888888" } : { id: newId(), label: "新しい記号", symbol: "?", color: "#888888" };
-    const next = (isPart ? partCatalog : markCatalog).concat([item]);
-    if (isPart) setPartCatalog(next); else setMarkCatalog(next);
-    saveCatalog(isPart ? "part-catalog" : "mark-catalog", next);
+    const [list, setList, key] = catalogStateFor(kind);
+    const item = kind === "point"
+      ? { id: newId(), label: "新しい記号", symbol: "?", color: "#888888" }
+      : { id: newId(), label: kind === "part" ? "新しいパート" : "新しいマーカー", color: "#888888" };
+    const next = list.concat([item]);
+    setList(next);
+    saveCatalog(key, next);
   }
   function updateCatalogItem(kind, id, patch) {
-    const isPart = kind === "part";
-    const next = (isPart ? partCatalog : markCatalog).map((it) => (it.id === id ? Object.assign({}, it, patch) : it));
-    if (isPart) setPartCatalog(next); else setMarkCatalog(next);
-    saveCatalog(isPart ? "part-catalog" : "mark-catalog", next);
+    const [list, setList, key] = catalogStateFor(kind);
+    const next = list.map((it) => (it.id === id ? Object.assign({}, it, patch) : it));
+    setList(next);
+    saveCatalog(key, next);
   }
   function deleteCatalogItem(kind, id) {
-    const isPart = kind === "part";
-    const next = (isPart ? partCatalog : markCatalog).filter((it) => it.id !== id);
-    if (isPart) setPartCatalog(next); else setMarkCatalog(next);
-    saveCatalog(isPart ? "part-catalog" : "mark-catalog", next);
+    const [list, setList, key] = catalogStateFor(kind);
+    const next = list.filter((it) => it.id !== id);
+    setList(next);
+    saveCatalog(key, next);
   }
 
   const isFormMode = mode === "edit" || mode === "new";
@@ -819,8 +915,8 @@ function LyricsArchive() {
         ]),
         selectedSong.tags && selectedSong.tags.length > 0 && E("div", { key: "tags", style: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 } }, selectedSong.tags.map((t) => E("span", { key: t, style: { fontFamily: FONT_M, fontSize: 11, color: C.waxDim, border: `1px solid ${C.waxDim}`, borderRadius: 2, padding: "1px 6px" } }, `#${t}`))),
         E("div", { key: "lyrics", style: { borderTop: `1px dashed ${C.paperLine}`, marginTop: 18, paddingTop: 18 } }, [
-          E(LyricsRenderer, { key: "r", text: selectedSong.lyrics, parts: selectedSong.parts, marks: selectedSong.marks, partCatalog, markCatalog, interactive: false }),
-          E(Legend, { key: "lg", parts: selectedSong.parts, marks: selectedSong.marks, partCatalog, markCatalog }),
+          E(LyricsRenderer, { key: "r", text: selectedSong.lyrics, parts: selectedSong.parts, marks: selectedSong.marks, points: selectedSong.points, partCatalog, markCatalog, pointCatalog, interactive: false }),
+          E(Legend, { key: "lg", parts: selectedSong.parts, marks: selectedSong.marks, points: selectedSong.points, partCatalog, markCatalog, pointCatalog }),
         ]),
         E("div", { key: "vids", style: { borderTop: `1px dashed ${C.paperLine}`, marginTop: 16, paddingTop: 14 } }, [
           E("div", { key: "lbl", style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060", marginBottom: 6 } }, "参考動画"),
@@ -878,37 +974,70 @@ function LyricsArchive() {
       ])
     );
   } else if (mode === "annotate" && selectedSong) {
+    const showAbove = !!(selRect && selRect.top > 200);
+    const toolbarLeft = selRect ? Math.min(Math.max(selRect.left, 8), Math.max(8, window.innerWidth - 8 - 300)) : 0;
     mainContent = E("div", { style: { maxWidth: 768, margin: "0 auto", padding: "32px 24px" } }, [
       E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 } }, [
-        E("span", { key: "t", style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, "✨ パート・歌唱記号を編集"),
-        E("div", { key: "btns", style: { display: "flex", gap: 8 } }, [
+        E("span", { key: "t", style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, "✨ パート・記号を編集"),
+        E("div", { key: "btns", style: { display: "flex", gap: 8, flexWrap: "wrap" } }, [
           E("button", { key: "p", onClick: () => setCatalogModal("part"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ パート色を管理"),
-          E("button", { key: "m", onClick: () => setCatalogModal("mark"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ 記号タイプを管理"),
+          E("button", { key: "m", onClick: () => setCatalogModal("mark"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ マーカーを管理"),
+          E("button", { key: "pt", onClick: () => setCatalogModal("point"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ 記号を管理"),
         ]),
       ]),
-      E("p", { key: "desc", style: { fontFamily: FONT_B, fontSize: 12, color: C.paperTextDim, marginBottom: 12, lineHeight: 1.7 } }, "歌詞の一部をドラッグして選択すると、下にツールバーが表示されます。装飾済みの範囲を選んで「解除」を押すと削除できます。"),
+      E("div", { key: "paint", style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "10px 12px", marginBottom: 14 } }, [
+        E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 6, fontFamily: FONT_M } }, "パートを選んでから歌詞をなぞると、その色に塗れます"),
+        E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, partCatalog.map((p) => {
+          const active = paintPart === p.id;
+          return E("button", {
+            key: p.id, onClick: () => setPaintPart(active ? null : p.id),
+            style: { display: "flex", alignItems: "center", gap: 6, background: active ? `${p.color}33` : C.ink, border: `2px solid ${p.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" },
+          }, E("span", { style: { width: 9, height: 9, borderRadius: 2, background: p.color, display: "inline-block" } }), E("span", { style: { fontSize: 11, color: active ? p.color : C.paperText, fontFamily: FONT_B, fontWeight: active ? 700 : 400 } }, p.label));
+        })),
+        paintPart && E("div", { key: "hint", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, fontFamily: FONT_M, fontSize: 11, color: C.brass } }, [
+          E("span", { key: "t" }, "🖌 塗りモード中 - 歌詞をドラッグしてください"),
+          E("button", { key: "off", onClick: () => setPaintPart(null), style: { fontSize: 10, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 3, padding: "2px 7px", cursor: "pointer" } }, "塗りモード解除"),
+        ]),
+      ]),
+      E("p", { key: "desc", style: { fontFamily: FONT_B, fontSize: 12, color: C.paperTextDim, marginBottom: 12, lineHeight: 1.7 } }, "歌詞をドラッグ(スマホは指でなぞる)して選択すると、選択箇所の近くにマーカー・記号のツールバーが出ます。"),
       E("div", { key: "card", style: { background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 2, padding: "24px 28px", boxShadow: "0 8px 24px rgba(0,0,0,0.35)" } },
-        E(LyricsRenderer, { text: selectedSong.lyrics, parts: draftParts, marks: draftMarks, partCatalog, markCatalog, interactive: true, containerRef: annotateRef, onMouseUp: handleMouseUp })
+        E(LyricsRenderer, { text: selectedSong.lyrics, parts: draftParts, marks: draftMarks, points: draftPoints, partCatalog, markCatalog, pointCatalog, interactive: true, containerRef: annotateRef, onMouseUp: handlePointerCommit, onTouchEnd: handlePointerCommit })
       ),
-      selRange && E("div", { key: "tool", style: { marginTop: 16, background: C.inkPanel, border: `1px solid ${C.brassDim}`, borderRadius: 6, padding: "14px 16px" } }, [
-        E("div", { key: "sel", style: { fontFamily: FONT_M, fontSize: 11, color: C.paperTextDim, marginBottom: 8 } }, `選択中 (${selRange.end - selRange.start}文字): 「${selectedSong.lyrics.slice(selRange.start, selRange.end).slice(0, 24)}${selRange.end - selRange.start > 24 ? "…" : ""}」`),
-        E("div", { key: "parts", style: { marginBottom: 10 } }, [
-          E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 5, fontFamily: FONT_M } }, "パートを塗る"),
-          E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, partCatalog.map((p) => E("button", { key: p.id, onClick: () => applyPart(p.id), style: { display: "flex", alignItems: "center", gap: 6, background: C.ink, border: `1px solid ${p.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, E("span", { style: { width: 9, height: 9, borderRadius: 2, background: p.color, display: "inline-block" } }), E("span", { style: { fontSize: 11, color: C.paperText, fontFamily: FONT_B } }, p.label)))),
-        ]),
-        E("div", { key: "marks", style: { marginBottom: 12 } }, [
-          E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 5, fontFamily: FONT_M } }, "歌唱記号を付ける"),
-          E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, markCatalog.map((m) => E("button", { key: m.id, onClick: () => applyMark(m.id), style: { display: "flex", alignItems: "center", gap: 6, background: C.ink, border: `1px solid ${m.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, E("span", { style: { fontSize: 11, color: m.color, fontWeight: 700 } }, m.symbol), E("span", { style: { fontSize: 11, color: C.paperText, fontFamily: FONT_B } }, m.label)))),
-        ]),
-        E("div", { key: "act", style: { display: "flex", gap: 8 } }, [
-          E("button", { key: "clr", onClick: clearSelection, style: { fontSize: 11, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 4, padding: "5px 10px", cursor: "pointer" } }, "選択範囲の装飾を解除"),
-          E("button", { key: "cls", onClick: () => { setSelRange(null); const s = window.getSelection(); if (s) s.removeAllRanges(); }, style: { fontSize: 11, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 10px", cursor: "pointer" } }, "閉じる"),
-        ]),
-      ]),
-      E(Legend, { key: "legend", parts: draftParts, marks: draftMarks, partCatalog, markCatalog }),
+      E(Legend, { key: "legend", parts: draftParts, marks: draftMarks, points: draftPoints, partCatalog, markCatalog, pointCatalog }),
       E("div", { key: "actions", style: { display: "flex", gap: 8, marginTop: 20 } }, [
         E("button", { key: "save", onClick: saveAnnotations, disabled: saving, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 5, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 } }, saving ? "保存中..." : "💾 保存する"),
         E("button", { key: "cancel", onClick: () => setMode("view"), style: { background: "transparent", color: C.paperTextDim, border: `1px solid ${C.paperLine}`, borderRadius: 5, padding: "9px 16px", fontSize: 13, cursor: "pointer" } }, "✕ キャンセル"),
+      ]),
+      selRange && selRect && E("div", {
+        key: "floatbar",
+        onMouseDown: (ev) => ev.preventDefault(),
+        style: {
+          position: "fixed", zIndex: 60, width: "min(300px, 92vw)",
+          left: toolbarLeft, top: showAbove ? Math.max(8, selRect.top - 8) : Math.min(window.innerHeight - 8, selRect.bottom + 8),
+          transform: showAbove ? "translateY(-100%)" : "none",
+          background: C.inkPanel, border: `1px solid ${C.brassDim}`, borderRadius: 8, padding: "10px 12px",
+          boxShadow: "0 10px 28px rgba(0,0,0,0.5)",
+        },
+      }, [
+        E("div", { key: "sel", style: { fontFamily: FONT_M, fontSize: 10, color: C.paperTextDim, marginBottom: 6 } }, `選択中: 「${selectedSong.lyrics.slice(selRange.start, selRange.end).slice(0, 16)}${selRange.end - selRange.start > 16 ? "…" : ""}」`),
+        E("div", { key: "marks", style: { marginBottom: 8 } }, [
+          E("div", { key: "l", style: { fontSize: 9, color: "#8A8060", marginBottom: 4, fontFamily: FONT_M } }, "マーカー(選択範囲をハイライト)"),
+          E("div", { key: "row", style: { display: "flex", gap: 5, flexWrap: "wrap" } }, markCatalog.map((m) => E("button", { key: m.id, onClick: () => applyMark(m.id), style: { fontSize: 11, color: C.paperText, fontFamily: FONT_B, background: `${m.color}33`, border: `1px solid ${m.color}`, borderRadius: 12, padding: "4px 9px", cursor: "pointer" } }, m.label))),
+        ]),
+        E("div", { key: "points", style: { marginBottom: 8 } }, [
+          E("div", { key: "l", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 } }, [
+            E("span", { key: "lbl", style: { fontSize: 9, color: "#8A8060", fontFamily: FONT_M } }, "記号(選択範囲の前後に挿入)"),
+            E("div", { key: "toggle", style: { display: "flex", gap: 2 } }, [
+              E("button", { key: "before", onClick: () => setPointInsertSide("before"), style: { fontSize: 9, padding: "2px 6px", borderRadius: 3, cursor: "pointer", background: pointInsertSide === "before" ? C.brass : "transparent", color: pointInsertSide === "before" ? C.ink : C.paperTextDim, border: `1px solid ${C.inkBorder}` } }, "前"),
+              E("button", { key: "after", onClick: () => setPointInsertSide("after"), style: { fontSize: 9, padding: "2px 6px", borderRadius: 3, cursor: "pointer", background: pointInsertSide === "after" ? C.brass : "transparent", color: pointInsertSide === "after" ? C.ink : C.paperTextDim, border: `1px solid ${C.inkBorder}` } }, "後"),
+            ]),
+          ]),
+          E("div", { key: "row", style: { display: "flex", gap: 5, flexWrap: "wrap" } }, pointCatalog.map((pt) => E("button", { key: pt.id, onClick: () => insertPoint(pt.id), style: { display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: C.paperText, fontFamily: FONT_B, background: C.ink, border: `1px solid ${pt.color}`, borderRadius: 4, padding: "4px 8px", cursor: "pointer" } }, E("span", { style: { color: pt.color, fontWeight: 700 } }, pt.symbol), pt.label))),
+        ]),
+        E("div", { key: "act", style: { display: "flex", gap: 6 } }, [
+          E("button", { key: "clr", onClick: clearSelection, style: { fontSize: 10, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 4, padding: "4px 9px", cursor: "pointer" } }, "選択範囲の装飾を解除"),
+          E("button", { key: "cls", onClick: closeToolbar, style: { fontSize: 10, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "4px 9px", cursor: "pointer" } }, "閉じる"),
+        ]),
       ]),
     ]);
   }
@@ -923,7 +1052,8 @@ function LyricsArchive() {
     sidebar, mainPanel,
     legacyGate && E(LegacyPinGate, { key: "legacy", onSubmit: submitLegacyGate, onCancel: () => setLegacyGate(null), error: legacyGateError, busy: legacyGateBusy }),
     catalogModal === "part" && E(CatalogModal, { key: "catp", title: "パート色を管理", items: partCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("part"), onUpdate: (id, patch) => updateCatalogItem("part", id, patch), onDelete: (id) => deleteCatalogItem("part", id) }),
-    catalogModal === "mark" && E(CatalogModal, { key: "catm", title: "歌唱記号タイプを管理", items: markCatalog, hasSymbol: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("mark"), onUpdate: (id, patch) => updateCatalogItem("mark", id, patch), onDelete: (id) => deleteCatalogItem("mark", id) }),
+    catalogModal === "mark" && E(CatalogModal, { key: "catm", title: "マーカー(ハイライト)を管理", items: markCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("mark"), onUpdate: (id, patch) => updateCatalogItem("mark", id, patch), onDelete: (id) => deleteCatalogItem("mark", id) }),
+    catalogModal === "point" && E(CatalogModal, { key: "catpt", title: "記号(ブレス・ロングトーン等)を管理", items: pointCatalog, hasSymbol: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("point"), onUpdate: (id, patch) => updateCatalogItem("point", id, patch), onDelete: (id) => deleteCatalogItem("point", id) }),
   ]);
 }
 
