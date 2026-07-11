@@ -1,0 +1,934 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>歌詞アーカイブ</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.7.1/firebase-app-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.7.1/firebase-auth-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.7.1/firebase-firestore-compat.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Special+Elite&family=Work+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; margin: 0; font-family: 'Work Sans', sans-serif; }
+  button { font-family: inherit; }
+  input, textarea { font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+"use strict";
+
+// ================= Firebase =================
+const firebaseConfig = {
+  apiKey: "AIzaSyBraX5fONAc6OZEf8sE0aKrExTzCSSrjCs",
+  authDomain: "login-eab5f.firebaseapp.com",
+  projectId: "login-eab5f",
+  storageBucket: "login-eab5f.firebasestorage.app",
+  messagingSenderId: "116826467782",
+  appId: "1:116826467782:web:78bf92efb4a6fa753516c7",
+};
+firebase.initializeApp(firebaseConfig);
+const fbAuth = firebase.auth();
+const googleProvider = new firebase.auth.GoogleAuthProvider();
+const db = firebase.firestore();
+
+// ================= React shorthand =================
+const E = React.createElement;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+// ================= design tokens =================
+const C = {
+  ink: "#1B1E27", inkPanel: "#242A38", inkBorder: "#3A4256",
+  paper: "#EAE0C4", paperShade: "#DDCFA6", paperLine: "#C9BB93",
+  brass: "#BE8F4E", brassDim: "#8C6A3D", wax: "#8B3A3A", waxDim: "#6E2E2E",
+  inkText: "#2A2418", paperText: "#EDE7DA", paperTextDim: "#A9A28C",
+};
+const FONT_D = "'Special Elite', cursive";
+const FONT_B = "'Work Sans', sans-serif";
+const FONT_M = "'IBM Plex Mono', monospace";
+
+const DEFAULT_PART_CATALOG = [
+  { id: "main", label: "メインボーカル", color: "#C0392B" },
+  { id: "female", label: "女性", color: "#2E6DA4" },
+  { id: "male", label: "男性", color: "#3A8F5A" },
+  { id: "harmony", label: "ハモリ", color: "#7B4FA3" },
+  { id: "all", label: "全員", color: "#C97A2B" },
+];
+const DEFAULT_MARK_CATALOG = [
+  { id: "falsetto", label: "ファルセット", symbol: "Fal", color: "#8E7CC3" },
+  { id: "accent", label: "アクセント", symbol: ">", color: "#D9534F" },
+  { id: "strong", label: "強く歌う", symbol: "f", color: "#C0392B" },
+  { id: "weak", label: "弱く歌う", symbol: "p", color: "#5B9BD5" },
+  { id: "vibrato", label: "ビブラート", symbol: "〜", color: "#8E7CC3" },
+  { id: "longtone", label: "ロングトーン", symbol: "—", color: "#4A7A5E" },
+  { id: "cut", label: "音を切る", symbol: "×", color: "#7A7A7A" },
+  { id: "rise", label: "上げる", symbol: "↑", color: "#D68A3C" },
+  { id: "fall", label: "下げる", symbol: "↓", color: "#3C7FD6" },
+];
+const DEFAULT_REACTION_TYPES = [
+  { id: "thumbsup", emoji: "👍", label: "参考になった" },
+  { id: "mic", emoji: "🎤", label: "歌いやすかった" },
+  { id: "palette", emoji: "🎼", label: "色分けが分かりやすかった" },
+  { id: "note", emoji: "🎵", label: "歌唱記号が参考になった" },
+  { id: "star", emoji: "⭐", label: "お気に入り" },
+];
+
+// ================= Firestore storage helpers =================
+// songs/{songId}                       : 曲データ本体
+// songs/{songId}/reactions/{userId}    : ユーザーごとのリアクション { types: string[] }
+// catalogs/{catalogId}                 : part-catalog / mark-catalog / reaction-catalog
+
+async function getIndex() {
+  try {
+    const snap = await db.collection("songs").get();
+    return snap.docs.map((doc) => {
+      const d = doc.data();
+      return {
+        id: doc.id,
+        title: d.title,
+        artist: d.artist,
+        tags: d.tags || [],
+        authorId: d.authorId || null,
+        authorName: d.authorName || null,
+        updatedAt: d.updatedAt,
+        createdAt: d.createdAt,
+        reactionTotal: d.reactionTotal || 0,
+        protected: !!d.passwordHash,
+      };
+    });
+  } catch (e) { return []; }
+}
+async function getSong(id) {
+  try {
+    const doc = await db.collection("songs").doc(id).get();
+    return doc.exists ? Object.assign({ id: doc.id }, doc.data()) : null;
+  } catch (e) { return null; }
+}
+async function setSong(song) {
+  const data = Object.assign({}, song);
+  const id = data.id;
+  delete data.id;
+  await db.collection("songs").doc(id).set(data, { merge: true });
+}
+async function deleteSongKey(id) {
+  try { await db.collection("songs").doc(id).delete(); } catch (e) {}
+}
+async function loadCatalog(key, defaults) {
+  try {
+    const doc = await db.collection("catalogs").doc(key).get();
+    if (doc.exists && doc.data() && doc.data().items) return doc.data().items;
+  } catch (e) {}
+  try { await db.collection("catalogs").doc(key).set({ items: defaults }); } catch (e) {}
+  return defaults;
+}
+async function saveCatalog(key, items) {
+  try { await db.collection("catalogs").doc(key).set({ items }); } catch (e) {}
+}
+async function getReactions(songId) {
+  try {
+    const snap = await db.collection("songs").doc(songId).collection("reactions").get();
+    const counts = {}, users = {};
+    snap.docs.forEach((doc) => {
+      const types = doc.data().types || [];
+      users[doc.id] = types;
+      types.forEach((t) => { counts[t] = (counts[t] || 0) + 1; });
+    });
+    return { counts, users };
+  } catch (e) { return { counts: {}, users: {} }; }
+}
+async function setUserReaction(songId, userId, types) {
+  await db.collection("songs").doc(songId).collection("reactions").doc(userId).set({ types });
+}
+async function updateReactionTotal(songId, total) {
+  try { await db.collection("songs").doc(songId).update({ reactionTotal: total }); } catch (e) {}
+}
+
+// ---------- legacy window.storage readers (アーティファクト専用ストレージからの読み取り専用。移行専用) ----------
+async function getLegacyIndex() {
+  try { const r = await window.storage.get("songs-index", true); return r ? JSON.parse(r.value) : []; } catch (e) { return []; }
+}
+async function getLegacySong(id) {
+  try { const r = await window.storage.get(`song:${id}`, true); return r ? JSON.parse(r.value) : null; } catch (e) { return null; }
+}
+async function getLegacyCatalog(key) {
+  try { const r = await window.storage.get(key, true); return r ? JSON.parse(r.value) : null; } catch (e) { return null; }
+}
+async function getLegacyReactions(songId) {
+  try { const r = await window.storage.get(`reactions:${songId}`, true); return r ? JSON.parse(r.value) : { counts: {}, users: {} }; } catch (e) { return { counts: {}, users: {} }; }
+}
+
+// window.storage の中身を Firestore に一括コピーする（移行完了後は使わなくなる想定の一時的な機能）
+async function migrateLegacyDataToFirestore(onProgress) {
+  const legacyIndex = await getLegacyIndex();
+  let done = 0;
+  for (const entry of legacyIndex) {
+    const song = await getLegacySong(entry.id);
+    if (song) {
+      await setSong(song);
+      const reactions = await getLegacyReactions(song.id);
+      const userIds = Object.keys(reactions.users || {});
+      for (const uid of userIds) {
+        await setUserReaction(song.id, uid, reactions.users[uid] || []);
+      }
+    }
+    done += 1;
+    if (onProgress) onProgress(done, legacyIndex.length);
+  }
+  for (const key of ["part-catalog", "mark-catalog", "reaction-catalog"]) {
+    const items = await getLegacyCatalog(key);
+    if (items) await saveCatalog(key, items);
+  }
+  return legacyIndex.length;
+}
+
+function newId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}.${p(d.getMonth() + 1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// ---------- legacy 4-digit PIN helpers (for songs created before the account system existed) ----------
+function randomHex(len) {
+  len = len || 16;
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function sha256Hex(str) {
+  const enc = new TextEncoder().encode(str);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function hashPin(pin, salt) { return sha256Hex(`${salt}:${pin}`); }
+function isValidPin(pin) { return /^\d{4}$/.test(pin); }
+
+// ---------- text-selection -> character offset helpers ----------
+function textOffsetWalker(container) {
+  return document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      let el = node.parentElement;
+      while (el && el !== container) {
+        if (el.dataset && el.dataset.annotSkip === "true") return NodeFilter.FILTER_REJECT;
+        el = el.parentElement;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+}
+function isInSkip(node, container) {
+  let el = node.nodeType === 3 ? node.parentElement : node;
+  while (el && el !== container) {
+    if (el.dataset && el.dataset.annotSkip === "true") return true;
+    el = el.parentElement;
+  }
+  return false;
+}
+function nodeOffsetToTextOffset(container, node, offset) {
+  const walker = textOffsetWalker(container);
+  let total = 0, current;
+  while ((current = walker.nextNode())) {
+    if (current === node) return total + offset;
+    total += current.textContent.length;
+  }
+  return null;
+}
+function getSelectionOffsets(container) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) return null;
+  if (isInSkip(range.startContainer, container) || isInSkip(range.endContainer, container)) return null;
+  const start = nodeOffsetToTextOffset(container, range.startContainer, range.startOffset);
+  const end = nodeOffsetToTextOffset(container, range.endContainer, range.endOffset);
+  if (start == null || end == null || start === end) return null;
+  return { start: Math.min(start, end), end: Math.max(start, end) };
+}
+function buildSegments(text, parts, marks) {
+  const points = new Set([0, text.length]);
+  (parts || []).forEach((p) => { points.add(p.start); points.add(p.end); });
+  (marks || []).forEach((m) => { points.add(m.start); points.add(m.end); });
+  const sorted = Array.from(points).filter((n) => n >= 0 && n <= text.length).sort((a, b) => a - b);
+  const segments = [];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const s = sorted[i], e = sorted[i + 1];
+    if (s === e) continue;
+    const part = (parts || []).find((p) => p.start <= s && p.end >= e);
+    const marksHere = (marks || []).filter((m) => m.start <= s && m.end >= e);
+    segments.push({ start: s, end: e, text: text.slice(s, e), part, marksHere });
+  }
+  if (segments.length === 0 && text.length > 0) segments.push({ start: 0, end: text.length, text, part: null, marksHere: [] });
+  return segments;
+}
+
+// ---------- youtube reference videos (oEmbed, no API key required) ----------
+function extractYoutubeId(url) {
+  try {
+    const u = new URL(url.trim());
+    const host = u.hostname.replace("www.", "");
+    if (host === "youtu.be") return u.pathname.slice(1).split("/")[0] || null;
+    if (host === "youtube.com" || host === "m.youtube.com") {
+      if (u.pathname === "/watch") return u.searchParams.get("v");
+      const m = u.pathname.match(/\/(shorts|embed|live)\/([^/?]+)/);
+      if (m) return m[2];
+    }
+    return null;
+  } catch (e) { return null; }
+}
+async function fetchYoutubeMeta(url) {
+  const videoId = extractYoutubeId(url);
+  if (!videoId) return null;
+  let title = null, channel = null;
+  try {
+    const res = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
+    if (res.ok) { const data = await res.json(); title = data.title || null; channel = data.author_name || null; }
+  } catch (e) {}
+  return { videoId, title, channel, thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` };
+}
+
+const inputStyle = {
+  background: "#F5EFDC", border: `1px solid ${C.paperLine}`, borderRadius: 4, padding: "9px 10px",
+  fontFamily: FONT_M, fontSize: 13, color: C.inkText, outline: "none", width: "100%",
+};
+
+// ================= small components =================
+function Stamp({ children, tone }) {
+  const color = tone === "wax" ? C.wax : C.brass;
+  return E("span", { style: { fontFamily: FONT_M, fontSize: 11, letterSpacing: 0.5, color, border: `1px solid ${color}`, borderRadius: 3, padding: "2px 6px", display: "inline-block", transform: "rotate(-1deg)" } }, children);
+}
+function EmptyState({ title, sub }) {
+  return E("div", { style: { height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: "0 24px", textAlign: "center" } },
+    E("div", { style: { fontFamily: FONT_B, color: C.paperText, fontSize: 15, fontWeight: 600 } }, title),
+    E("div", { style: { fontFamily: FONT_B, color: C.paperTextDim, fontSize: 13, maxWidth: 320 } }, sub)
+  );
+}
+function Field(label, child) {
+  return E("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+    E("label", { style: { fontFamily: FONT_M, fontSize: 11, color: "#6B6144", letterSpacing: 0.3 } }, label),
+    child
+  );
+}
+function PinInput(value, onChange) {
+  return E("input", {
+    value, type: "password", inputMode: "numeric", maxLength: 4, placeholder: "••••",
+    onChange: (ev) => onChange(ev.target.value.replace(/\D/g, "").slice(0, 4)),
+    style: Object.assign({}, inputStyle, { letterSpacing: 6, fontSize: 16, width: 100, textAlign: "center" }),
+  });
+}
+
+function LyricsRenderer({ text, parts, marks, partCatalog, markCatalog, interactive, containerRef, onMouseUp }) {
+  const segments = useMemo(() => buildSegments(text || "", parts, marks), [text, parts, marks]);
+  return E("div", {
+    ref: containerRef, onMouseUp: interactive ? onMouseUp : undefined,
+    style: { fontFamily: FONT_M, color: C.inkText, fontSize: 14, lineHeight: 2.1, whiteSpace: "pre-wrap", userSelect: "text", cursor: interactive ? "text" : "default" },
+  }, segments.map((seg, i) => {
+    const partDef = seg.part ? (partCatalog || []).find((p) => p.id === seg.part.colorId) : null;
+    const markDefs = (seg.marksHere || []).map((m) => (markCatalog || []).find((mc) => mc.id === m.typeId)).filter(Boolean);
+    return E("span", {
+      key: i,
+      style: { backgroundColor: partDef ? `${partDef.color}45` : "transparent", borderBottom: markDefs.length ? `2px solid ${markDefs[0].color}` : "none", borderRadius: 2 },
+    }, seg.text, markDefs.map((md, j) => E("sup", { key: j, "data-annot-skip": "true", title: md.label, style: { fontSize: 10, color: md.color, marginLeft: 1, fontWeight: 700 } }, md.symbol)));
+  }));
+}
+
+function Legend({ parts, marks, partCatalog, markCatalog }) {
+  const usedPartIds = Array.from(new Set((parts || []).map((p) => p.colorId)));
+  const usedMarkIds = Array.from(new Set((marks || []).map((m) => m.typeId)));
+  if (usedPartIds.length === 0 && usedMarkIds.length === 0) return null;
+  return E("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginTop: 16, paddingTop: 12, borderTop: `1px dashed ${C.paperLine}` } },
+    usedPartIds.length > 0 && E("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+      E("span", { style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060" } }, "パート:"),
+      usedPartIds.map((id) => {
+        const p = (partCatalog || []).find((pc) => pc.id === id);
+        if (!p) return null;
+        return E("span", { key: id, style: { display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_M, fontSize: 11, color: "#5A5138" } },
+          E("span", { style: { width: 9, height: 9, borderRadius: 2, background: p.color, display: "inline-block" } }), p.label);
+      })
+    ),
+    usedMarkIds.length > 0 && E("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+      E("span", { style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060" } }, "記号:"),
+      usedMarkIds.map((id) => {
+        const m = (markCatalog || []).find((mc) => mc.id === id);
+        if (!m) return null;
+        return E("span", { key: id, style: { display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_M, fontSize: 11, color: "#5A5138" } },
+          E("span", { style: { color: m.color, fontWeight: 700 } }, m.symbol), m.label);
+      })
+    )
+  );
+}
+
+function ModalShell(children, width) {
+  return E("div", { style: { position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 16px", background: "rgba(0,0,0,0.55)" } },
+    E("div", { style: { background: C.paper, borderRadius: 6, padding: "24px 26px", width: width || 320, maxHeight: "82vh", overflowY: "auto", boxShadow: "0 12px 32px rgba(0,0,0,0.5)" } }, children)
+  );
+}
+
+function LegacyPinGate({ onSubmit, onCancel, error, busy }) {
+  const [pin, setPin] = useState("");
+  return ModalShell([
+    E("div", { key: "h", style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } },
+      E("span", { style: { fontFamily: FONT_D, color: C.inkText, fontSize: 16 } }, "🔒 旧バージョンの編集パスワード")),
+    E("p", { key: "p", style: { fontFamily: FONT_B, fontSize: 12, color: "#5A5138", marginBottom: 12, lineHeight: 1.6 } }, "この歌詞はアカウント制導入前に4桁パスワードで保護されています。認証すると、あなたが作成者として引き継がれます。"),
+    E("div", { key: "i" }, PinInput(pin, setPin)),
+    error && E("div", { key: "e", style: { color: C.wax, fontSize: 11, fontFamily: FONT_M, marginTop: 8 } }, error),
+    E("div", { key: "b", style: { display: "flex", gap: 8, marginTop: 16 } },
+      E("button", { onClick: () => onSubmit(pin), disabled: busy, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 5, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" } }, "確認"),
+      E("button", { onClick: onCancel, style: { background: "transparent", color: "#6B6144", border: `1px solid ${C.paperLine}`, borderRadius: 5, padding: "8px 14px", fontSize: 13, cursor: "pointer" } }, "キャンセル")
+    ),
+  ]);
+}
+
+function CatalogModal({ title, items, hasSymbol, onClose, onAdd, onUpdate, onDelete }) {
+  return E("div", { style: { position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 16px", background: "rgba(0,0,0,0.55)" } },
+    E("div", { style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "20px 22px", width: 420, maxHeight: "80vh", overflowY: "auto" } }, [
+      E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 } },
+        E("span", { style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, title),
+        E("button", { onClick: onClose, style: { background: "none", border: "none", cursor: "pointer", color: C.paperTextDim, fontSize: 16 } }, "×")),
+      E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } }, items.map((it) =>
+        E("div", { key: it.id, style: { display: "flex", alignItems: "center", gap: 8, background: C.ink, border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "6px 8px" } }, [
+          E("input", { key: "c", type: "color", value: it.color, onChange: (ev) => onUpdate(it.id, { color: ev.target.value }), style: { width: 28, height: 28, border: "none", background: "none", cursor: "pointer", padding: 0 } }),
+          hasSymbol && E("input", { key: "s", value: it.symbol || "", onChange: (ev) => onUpdate(it.id, { symbol: ev.target.value.slice(0, 4) }), style: { width: 44, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_M, fontSize: 12, padding: "4px 6px", textAlign: "center" } }),
+          E("input", { key: "l", value: it.label, onChange: (ev) => onUpdate(it.id, { label: ev.target.value }), style: { flex: 1, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_B, fontSize: 13, padding: "5px 8px" } }),
+          E("button", { key: "d", onClick: () => onDelete(it.id), title: "削除", style: { background: "none", border: "none", cursor: "pointer", color: C.waxDim } }, "✕"),
+        ])
+      )),
+      E("button", { key: "add", onClick: onAdd, style: { display: "flex", alignItems: "center", gap: 6, marginTop: 12, background: "transparent", border: `1px dashed ${C.brassDim}`, borderRadius: 4, padding: "7px 10px", color: C.brass, fontSize: 12, cursor: "pointer", fontFamily: FONT_M } }, "＋ 追加する"),
+      E("div", { key: "note", style: { fontSize: 11, color: C.paperTextDim, marginTop: 12, fontFamily: FONT_B, lineHeight: 1.6 } }, "ここでの変更は共有データとして全員に反映されます。色や記号、ラベルはあとから自由に変更できます。"),
+    ])
+  );
+}
+
+function ReactionBar({ reactionTypes, data, userId, onToggle }) {
+  const myTypes = new Set((userId && data.users && data.users[userId]) || []);
+  return E("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, reactionTypes.map((rt) => {
+    const active = myTypes.has(rt.id);
+    const count = (data.counts && data.counts[rt.id]) || 0;
+    return E("button", {
+      key: rt.id, onClick: () => onToggle(rt.id),
+      style: { display: "flex", alignItems: "center", gap: 6, background: active ? C.brass : "transparent", border: `1px solid ${active ? C.brass : C.inkBorder}`, borderRadius: 14, padding: "5px 10px", cursor: "pointer" },
+    }, E("span", { style: { fontSize: 13 } }, rt.emoji), E("span", { style: { fontSize: 11, fontFamily: FONT_M, color: active ? C.ink : C.paperTextDim } }, `${rt.label} ${count}`));
+  }));
+}
+
+function RefVideoList({ videos, canEdit, onRemove }) {
+  if (!videos || videos.length === 0) return null;
+  return E("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, marginTop: 8 } }, videos.map((v) =>
+    E("a", { key: v.id, href: v.url, target: "_blank", rel: "noreferrer", style: { position: "relative", display: "block", borderRadius: 4, overflow: "hidden", border: `1px solid ${C.inkBorder}`, textDecoration: "none" } }, [
+      E("img", { key: "img", src: v.thumbnail, alt: "", style: { width: "100%", display: "block", aspectRatio: "16/9", objectFit: "cover", background: C.ink } }),
+      E("div", { key: "cap", style: { padding: "6px 8px", background: C.inkPanel } }, E("div", { style: { fontSize: 11, color: C.paperText, fontFamily: FONT_B, lineHeight: 1.4 } }, v.title || v.url)),
+      canEdit && E("button", { key: "rm", onClick: (ev) => { ev.preventDefault(); ev.stopPropagation(); onRemove(v.id); }, style: { position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.6)", border: "none", borderRadius: 3, padding: "2px 6px", cursor: "pointer", color: "#fff", fontSize: 11 } }, "✕"),
+    ])
+  ));
+}
+function RefVideoAddForm({ onAdd }) {
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit() {
+    if (!url.trim()) return;
+    setBusy(true); setError("");
+    const ok = await onAdd(url.trim());
+    if (!ok) setError("有効なYouTube URLを認識できませんでした。"); else setUrl("");
+    setBusy(false);
+  }
+  return E("div", { style: { display: "flex", flexDirection: "column", gap: 4, marginTop: 8 } }, [
+    E("div", { key: "row", style: { display: "flex", gap: 8 } }, [
+      E("input", { key: "in", value: url, onChange: (ev) => setUrl(ev.target.value), placeholder: "YouTubeのURLを貼り付け", style: Object.assign({}, inputStyle, { flex: 1 }) }),
+      E("button", { key: "btn", onClick: submit, disabled: busy, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 4, padding: "0 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" } }, busy ? "取得中..." : "追加"),
+    ]),
+    error && E("div", { key: "err", style: { color: C.wax, fontSize: 11, fontFamily: FONT_M } }, error),
+  ]);
+}
+
+// ================= main app =================
+function LyricsArchive() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+
+  const [index, setIndexState] = useState([]);
+  const [loadingIndex, setLoadingIndex] = useState(true);
+  const [query, setQuery] = useState("");
+  const [sortMode, setSortMode] = useState("new");
+  const [selectedId, setSelectedId] = useState(null);
+  const [selectedSong, setSelectedSong] = useState(null);
+  const [loadingSong, setLoadingSong] = useState(false);
+  const [mode, setMode] = useState("empty");
+  const [form, setForm] = useState({ title: "", artist: "", tags: "", lyrics: "", note: "" });
+  const [saving, setSaving] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [previewEntry, setPreviewEntry] = useState(null);
+  const [err, setErr] = useState("");
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [mobileListOpen, setMobileListOpen] = useState(true);
+
+  const [partCatalog, setPartCatalog] = useState(DEFAULT_PART_CATALOG);
+  const [markCatalog, setMarkCatalog] = useState(DEFAULT_MARK_CATALOG);
+  const [reactionTypes, setReactionTypes] = useState(DEFAULT_REACTION_TYPES);
+  const [catalogModal, setCatalogModal] = useState(null);
+
+  const [draftParts, setDraftParts] = useState([]);
+  const [draftMarks, setDraftMarks] = useState([]);
+  const [selRange, setSelRange] = useState(null);
+  const annotateRef = useRef(null);
+
+  const [reactionData, setReactionData] = useState({ counts: {}, users: {} });
+
+  const [legacyGate, setLegacyGate] = useState(null);
+  const [legacyGateError, setLegacyGateError] = useState("");
+  const [legacyGateBusy, setLegacyGateBusy] = useState(false);
+  const [legacyUnlocked, setLegacyUnlocked] = useState({});
+
+  const [migrating, setMigrating] = useState(false);
+  const [migrateMsg, setMigrateMsg] = useState("");
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const refreshIndex = useCallback(async () => {
+    setLoadingIndex(true);
+    const list = await getIndex();
+    setIndexState(list);
+    setLoadingIndex(false);
+  }, []);
+
+  useEffect(() => {
+    refreshIndex();
+    loadCatalog("part-catalog", DEFAULT_PART_CATALOG).then(setPartCatalog);
+    loadCatalog("mark-catalog", DEFAULT_MARK_CATALOG).then(setMarkCatalog);
+    loadCatalog("reaction-catalog", DEFAULT_REACTION_TYPES).then(setReactionTypes);
+    const unsub = fbAuth.onAuthStateChanged((fbUser) => {
+      setUser(fbUser ? { id: fbUser.uid, name: fbUser.displayName || fbUser.email || "名無しさん", photoURL: fbUser.photoURL || null } : null);
+      setAuthLoading(false);
+    });
+    return () => unsub();
+  }, [refreshIndex]);
+
+  function login() {
+    setAuthError("");
+    fbAuth.signInWithPopup(googleProvider).catch((e) => setAuthError("ログインに失敗しました: " + e.message));
+  }
+  function logout() {
+    fbAuth.signOut();
+    if (mode === "mypage") setMode(selectedSong ? "view" : "empty");
+  }
+
+  async function runMigration() {
+    if (!confirm("Claude内(window.storage)に保存されている歌詞データを、すべてFirestoreにコピーします。よろしいですか?\n(すでにFirestoreに存在するデータは上書きされます)")) return;
+    setMigrating(true); setMigrateMsg("移行を開始します...");
+    try {
+      const count = await migrateLegacyDataToFirestore((done, total) => setMigrateMsg(`移行中... (${done}/${total})`));
+      setMigrateMsg(`✅ ${count}件の歌詞をFirestoreに移行しました。`);
+      await refreshIndex();
+      loadCatalog("part-catalog", DEFAULT_PART_CATALOG).then(setPartCatalog);
+      loadCatalog("mark-catalog", DEFAULT_MARK_CATALOG).then(setMarkCatalog);
+      loadCatalog("reaction-catalog", DEFAULT_REACTION_TYPES).then(setReactionTypes);
+    } catch (e) {
+      setMigrateMsg("⚠ 移行中にエラーが発生しました: " + e.message);
+    }
+    setMigrating(false);
+  }
+
+  const sortedFiltered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let list = index;
+    if (q) list = list.filter((s) => (s.title || "").toLowerCase().includes(q) || (s.artist || "").toLowerCase().includes(q) || (s.authorName || "").toLowerCase().includes(q) || (s.tags || []).some((t) => t.toLowerCase().includes(q)));
+    const sorted = list.slice();
+    if (sortMode === "popular") sorted.sort((a, b) => (b.reactionTotal || 0) - (a.reactionTotal || 0));
+    else sorted.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+    return sorted;
+  }, [index, query, sortMode]);
+  const mySongs = useMemo(() => (user ? index.filter((s) => s.authorId === user.id) : []), [index, user]);
+
+  async function selectSong(id) {
+    setSelectedId(id); setMode("view"); setShowHistory(false); setPreviewEntry(null); setLoadingSong(true); setErr(""); setMobileListOpen(false);
+    const song = await getSong(id);
+    const reactions = await getReactions(id);
+    setSelectedSong(song); setReactionData(reactions); setLoadingSong(false);
+  }
+  function canEditSong(song) {
+    if (!song || !user) return false;
+    if (!song.authorId) return true;
+    return song.authorId === user.id;
+  }
+  function needsLegacyClaim(song) { return !!song && !song.authorId && !!song.passwordHash; }
+
+  function requestAction(action, payload) {
+    if (!user) { setAuthError("この操作にはログインが必要です。"); return; }
+    if (!selectedSong) return;
+    if (needsLegacyClaim(selectedSong) && !legacyUnlocked[selectedSong.id]) {
+      setLegacyGateError(""); setLegacyGate({ song: selectedSong, action, payload }); return;
+    }
+    runAction(action, payload);
+  }
+  async function submitLegacyGate(pin) {
+    if (!isValidPin(pin)) { setLegacyGateError("4桁の数字を入力してください。"); return; }
+    setLegacyGateBusy(true);
+    const hash = await hashPin(pin, legacyGate.song.passwordSalt);
+    setLegacyGateBusy(false);
+    if (hash === legacyGate.song.passwordHash) {
+      setLegacyUnlocked((prev) => Object.assign({}, prev, { [legacyGate.song.id]: true }));
+      const action = legacyGate.action, payload = legacyGate.payload;
+      setLegacyGate(null);
+      runAction(action, payload);
+    } else setLegacyGateError("パスワードが正しくありません。");
+  }
+  function runAction(action, payload) {
+    if (action === "edit") startEdit();
+    else if (action === "delete") removeSong();
+    else if (action === "annotate") openAnnotate();
+    else if (action === "restore") restoreVersion(payload);
+  }
+
+  function startNew() {
+    if (!user) { setAuthError("歌詞を登録するにはログインしてください。"); return; }
+    setSelectedId(null); setSelectedSong(null);
+    setForm({ title: "", artist: "", tags: "", lyrics: "", note: "" });
+    setMode("new"); setMobileListOpen(false);
+  }
+  function startEdit() {
+    if (!selectedSong) return;
+    setForm({ title: selectedSong.title, artist: selectedSong.artist, tags: (selectedSong.tags || []).join(", "), lyrics: selectedSong.lyrics, note: "" });
+    setMode("edit"); setShowHistory(false);
+  }
+  function restoreVersion(entry) {
+    setForm({ title: entry.title, artist: entry.artist, tags: (entry.tags || []).join(", "), lyrics: entry.lyrics, note: `復元: v${entry.version} (${fmtDate(entry.editedAt)}) の内容に戻す` });
+    setMode("edit"); setShowHistory(false); setPreviewEntry(null);
+  }
+  function cancelForm() { setMode(selectedSong ? "view" : "empty"); }
+  function openAnnotate() {
+    if (!selectedSong) return;
+    setDraftParts(selectedSong.parts || []); setDraftMarks(selectedSong.marks || []); setSelRange(null); setMode("annotate");
+  }
+
+  async function saveForm() {
+    const title = form.title.trim(), artist = form.artist.trim(), lyrics = form.lyrics;
+    if (!title || !lyrics.trim()) { setErr("曲名と歌詞は必須です。"); return; }
+    if (!user) { setErr("ログインしてください。"); return; }
+    setErr(""); setSaving(true);
+    const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
+    const now = new Date().toISOString();
+    try {
+      if (mode === "new") {
+        const id = newId();
+        const song = { id, title, artist, tags, lyrics, authorId: user.id, authorName: user.name, version: 1, lastEditorId: user.id, lastEditorName: user.name, parts: [], marks: [], refVideos: [], createdAt: now, updatedAt: now, history: [], reactionTotal: 0 };
+        await setSong(song);
+        await refreshIndex();
+        setSelectedSong(song); setSelectedId(id); setReactionData({ counts: {}, users: {} }); setMode("view");
+      } else if (mode === "edit" && selectedSong) {
+        const textChanged = lyrics !== selectedSong.lyrics;
+        const prevVersionEntry = {
+          version: selectedSong.version || 1, title: selectedSong.title, artist: selectedSong.artist, tags: selectedSong.tags || [], lyrics: selectedSong.lyrics,
+          editedAt: selectedSong.updatedAt, editorId: selectedSong.lastEditorId || selectedSong.authorId, editorName: selectedSong.lastEditorName || selectedSong.authorName || "不明", note: form.note.trim() || null,
+        };
+        const history = [prevVersionEntry].concat(selectedSong.history || []).slice(0, 50);
+        const updated = Object.assign({}, selectedSong, {
+          title, artist, tags, lyrics,
+          authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name,
+          version: (selectedSong.version || 1) + 1, lastEditorId: user.id, lastEditorName: user.name,
+          parts: textChanged ? [] : (selectedSong.parts || []), marks: textChanged ? [] : (selectedSong.marks || []),
+          updatedAt: now, history,
+        });
+        await setSong(updated);
+        await refreshIndex();
+        setSelectedSong(updated); setMode("view");
+      }
+    } catch (e) { setErr("保存に失敗しました。もう一度お試しください。"); }
+    setSaving(false);
+  }
+
+  async function removeSong() {
+    if (!selectedSong) return;
+    if (!confirm("この歌詞を削除しますか?この操作は取り消せません。")) return;
+    const id = selectedSong.id;
+    await deleteSongKey(id);
+    await refreshIndex();
+    setSelectedId(null); setSelectedSong(null); setMode("empty");
+  }
+
+  function handleMouseUp() { setSelRange(getSelectionOffsets(annotateRef.current)); }
+  function applyPart(colorId) {
+    if (!selRange) return;
+    setDraftParts((prev) => prev.filter((p) => p.end <= selRange.start || p.start >= selRange.end).concat([{ id: newId(), start: selRange.start, end: selRange.end, colorId }]));
+    setSelRange(null); const s = window.getSelection(); if (s) s.removeAllRanges();
+  }
+  function applyMark(typeId) {
+    if (!selRange) return;
+    setDraftMarks((prev) => prev.filter((m) => !(m.typeId === typeId && !(m.end <= selRange.start || m.start >= selRange.end))).concat([{ id: newId(), start: selRange.start, end: selRange.end, typeId }]));
+    setSelRange(null); const s = window.getSelection(); if (s) s.removeAllRanges();
+  }
+  function clearSelection() {
+    if (!selRange) return;
+    setDraftParts((prev) => prev.filter((p) => p.end <= selRange.start || p.start >= selRange.end));
+    setDraftMarks((prev) => prev.filter((m) => m.end <= selRange.start || m.start >= selRange.end));
+    setSelRange(null); const s = window.getSelection(); if (s) s.removeAllRanges();
+  }
+  async function saveAnnotations() {
+    setSaving(true);
+    const updated = Object.assign({}, selectedSong, { parts: draftParts, marks: draftMarks, authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name, updatedAt: new Date().toISOString() });
+    await setSong(updated);
+    await refreshIndex();
+    setSelectedSong(updated); setMode("view"); setSaving(false);
+  }
+
+  async function addRefVideo(url) {
+    if (!selectedSong) return false;
+    const meta = await fetchYoutubeMeta(url);
+    if (!meta) return false;
+    const entry = { id: newId(), type: "youtube", url, videoId: meta.videoId, title: meta.title || meta.channel || url, thumbnail: meta.thumbnail, note: "", addedAt: new Date().toISOString(), addedBy: user.name };
+    const updated = Object.assign({}, selectedSong, { refVideos: (selectedSong.refVideos || []).concat([entry]) });
+    await setSong(updated); setSelectedSong(updated); return true;
+  }
+  async function removeRefVideo(videoEntryId) {
+    if (!selectedSong) return;
+    const updated = Object.assign({}, selectedSong, { refVideos: (selectedSong.refVideos || []).filter((v) => v.id !== videoEntryId) });
+    await setSong(updated); setSelectedSong(updated);
+  }
+
+  async function toggleReaction(typeId) {
+    if (!user) { setAuthError("リアクションするにはログインが必要です。"); return; }
+    if (!selectedSong) return;
+    const mineSet = new Set((reactionData.users && reactionData.users[user.id]) || []);
+    if (mineSet.has(typeId)) mineSet.delete(typeId); else mineSet.add(typeId);
+    const newTypes = Array.from(mineSet);
+    const newUsers = Object.assign({}, reactionData.users, { [user.id]: newTypes });
+    const newCounts = {};
+    Object.values(newUsers).forEach((types) => { (types || []).forEach((t) => { newCounts[t] = (newCounts[t] || 0) + 1; }); });
+    const newData = { counts: newCounts, users: newUsers };
+    setReactionData(newData);
+    const total = Object.values(newCounts).reduce((a, b) => a + b, 0);
+    try {
+      await setUserReaction(selectedSong.id, user.id, newTypes);
+      await updateReactionTotal(selectedSong.id, total);
+    } catch (e) {}
+    const list = await getIndex();
+    setIndexState(list);
+  }
+
+  function addCatalogItem(kind) {
+    const isPart = kind === "part";
+    const item = isPart ? { id: newId(), label: "新しいパート", color: "#888888" } : { id: newId(), label: "新しい記号", symbol: "?", color: "#888888" };
+    const next = (isPart ? partCatalog : markCatalog).concat([item]);
+    if (isPart) setPartCatalog(next); else setMarkCatalog(next);
+    saveCatalog(isPart ? "part-catalog" : "mark-catalog", next);
+  }
+  function updateCatalogItem(kind, id, patch) {
+    const isPart = kind === "part";
+    const next = (isPart ? partCatalog : markCatalog).map((it) => (it.id === id ? Object.assign({}, it, patch) : it));
+    if (isPart) setPartCatalog(next); else setMarkCatalog(next);
+    saveCatalog(isPart ? "part-catalog" : "mark-catalog", next);
+  }
+  function deleteCatalogItem(kind, id) {
+    const isPart = kind === "part";
+    const next = (isPart ? partCatalog : markCatalog).filter((it) => it.id !== id);
+    if (isPart) setPartCatalog(next); else setMarkCatalog(next);
+    saveCatalog(isPart ? "part-catalog" : "mark-catalog", next);
+  }
+
+  const isFormMode = mode === "edit" || mode === "new";
+  const editable = canEditSong(selectedSong);
+  const showEditControls = !!selectedSong && (editable || needsLegacyClaim(selectedSong) || !selectedSong.authorId);
+  const showSidebar = !isMobile || mobileListOpen;
+  const showMain = !isMobile || !mobileListOpen;
+
+  // ---------- sidebar ----------
+  const sidebar = E("div", { style: { display: showSidebar ? "flex" : "none", flexDirection: "column", width: isMobile ? "100%" : 320, flexShrink: 0, height: "100%", borderRight: `1px solid ${C.inkBorder}`, background: C.inkPanel } }, [
+    E("div", { key: "head", style: { padding: "22px 20px 16px", borderBottom: `1px solid ${C.inkBorder}` } }, [
+      E("div", { key: "logo", style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4 } }, E("span", { style: { fontFamily: FONT_D, color: C.paperText, fontSize: 20, letterSpacing: 0.5 } }, "📄 歌詞アーカイブ")),
+      E("div", { key: "sub", style: { color: C.paperTextDim, fontSize: 12, fontFamily: FONT_M, marginTop: 6 } }, "共有データベース ・ 誰でも閲覧可"),
+      E("div", { key: "profile", style: { marginTop: 12, display: "flex", alignItems: "center", justifyContent: "space-between", background: C.ink, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "8px 10px" } },
+        authLoading ? E("span", { style: { fontSize: 11, color: C.paperTextDim, fontFamily: FONT_M } }, "読み込み中...") :
+        user ? [
+          E("div", { key: "u", style: { display: "flex", alignItems: "center", gap: 8, minWidth: 0 } }, [
+            user.photoURL ? E("img", { key: "ph", src: user.photoURL, style: { width: 20, height: 20, borderRadius: "50%" } }) : E("span", { key: "ph2" }, "👤"),
+            E("span", { key: "nm", style: { fontSize: 12, color: C.paperText, fontFamily: FONT_B, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, user.name),
+          ]),
+          E("button", { key: "out", onClick: logout, style: { fontSize: 10, color: C.brassDim, background: "none", border: "none", cursor: "pointer" } }, "ログアウト"),
+        ] : E("button", { onClick: login, style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12, color: C.brass, background: "none", border: "none", cursor: "pointer" } }, "🔑 Googleでログイン")
+      ),
+      authError && E("div", { key: "aerr", style: { color: C.wax, fontSize: 10, fontFamily: FONT_M, marginTop: 6 } }, authError),
+      user && E("button", { key: "mp", onClick: () => setMode("mypage"), style: { width: "100%", marginTop: 8, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 11, color: mode === "mypage" ? C.ink : C.paperTextDim, background: mode === "mypage" ? C.brass : "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 5, padding: "6px 0", cursor: "pointer" } }, `📋 マイページ (${mySongs.length})`),
+      user && E("div", { key: "migrate", style: { marginTop: 8, borderTop: `1px dashed ${C.inkBorder}`, paddingTop: 8 } }, [
+        E("button", { key: "btn", onClick: runMigration, disabled: migrating, style: { width: "100%", fontSize: 10, color: C.brassDim, background: "none", border: `1px dashed ${C.brassDim}`, borderRadius: 4, padding: "5px 0", cursor: migrating ? "default" : "pointer", opacity: migrating ? 0.6 : 1 } }, migrating ? "移行中..." : "⚙ Claude内データをFirestoreへ移行"),
+        migrateMsg && E("div", { key: "msg", style: { fontSize: 10, color: C.paperTextDim, marginTop: 4, fontFamily: FONT_M, lineHeight: 1.5 } }, migrateMsg),
+      ]),
+    ]),
+    E("div", { key: "search", style: { padding: "14px 16px 0" } }, [
+      E("input", { key: "q", value: query, onChange: (ev) => setQuery(ev.target.value), placeholder: "曲名・アーティスト・作成者・タグで検索", style: { width: "100%", background: C.ink, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "8px 10px", color: C.paperText, fontSize: 13, fontFamily: FONT_M, outline: "none" } }),
+      E("div", { key: "sort", style: { display: "flex", gap: 6, marginTop: 8 } }, [["new", "新着順"], ["popular", "人気順"]].map(([k, label]) =>
+        E("button", { key: k, onClick: () => setSortMode(k), style: { flex: 1, fontSize: 11, padding: "5px 0", borderRadius: 4, cursor: "pointer", background: sortMode === k ? C.brass : "transparent", color: sortMode === k ? C.ink : C.paperTextDim, border: `1px solid ${sortMode === k ? C.brass : C.inkBorder}` } }, label)
+      )),
+      E("button", { key: "new", onClick: startNew, style: { width: "100%", marginTop: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: C.brass, color: C.ink, borderRadius: 6, padding: "9px 0", fontSize: 13, fontWeight: 600, border: "none", cursor: "pointer" } }, "＋ 新しい歌詞を登録"),
+    ]),
+    E("div", { key: "list", style: { flex: 1, overflowY: "auto", padding: "14px 12px", display: "flex", flexDirection: "column", gap: 8 } },
+      loadingIndex ? E("div", { style: { color: C.paperTextDim, fontSize: 12, padding: 8 } }, "読み込み中...") :
+      sortedFiltered.length === 0 ? E("div", { style: { color: C.paperTextDim, fontSize: 12, padding: 8, lineHeight: 1.6 } }, query ? "該当する歌詞が見つかりません。" : "まだ歌詞が登録されていません。") :
+      sortedFiltered.map((s) => E("button", {
+        key: s.id, onClick: () => selectSong(s.id),
+        style: { textAlign: "left", background: selectedId === s.id ? C.paperShade : C.paper, borderRadius: 3, padding: "10px 12px", border: `1px solid ${C.paperLine}`, borderLeft: `4px solid ${selectedId === s.id ? C.wax : C.brassDim}`, cursor: "pointer" },
+      }, [
+        E("div", { key: "t", style: { display: "flex", alignItems: "center", gap: 6 } }, E("span", { style: { fontFamily: FONT_D, color: C.inkText, fontSize: 14 } }, s.title), (!s.authorId && s.protected) && E("span", { style: { fontSize: 10 } }, "🔒")),
+        E("div", { key: "a", style: { fontFamily: FONT_M, color: "#5A5138", fontSize: 11, marginTop: 2 } }, `${s.artist || "アーティスト未設定"} ・ ${fmtDate(s.updatedAt)}`),
+        E("div", { key: "row", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 4 } }, [
+          E("span", { key: "au", style: { fontFamily: FONT_M, color: "#8A8060", fontSize: 10 } }, `作成: ${s.authorName || "未設定"}`),
+          s.reactionTotal > 0 && E("span", { key: "rt", style: { fontFamily: FONT_M, color: C.brassDim, fontSize: 10 } }, `♪ ${s.reactionTotal}`),
+        ]),
+        s.tags && s.tags.length > 0 && E("div", { key: "tags", style: { display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 } }, s.tags.slice(0, 4).map((t) => E("span", { key: t, style: { fontFamily: FONT_M, fontSize: 10, color: C.waxDim, border: `1px solid ${C.waxDim}`, borderRadius: 2, padding: "0 4px" } }, `#${t}`))),
+      ]))
+    ),
+  ]);
+
+  // ---------- main content ----------
+  let mainContent;
+  if (mode === "empty") mainContent = E(EmptyState, { title: "歌詞を選ぶか、新しく登録してください", sub: "左の一覧から曲を選ぶと歌詞シートが表示されます。編集にはログインが必要です。" });
+  else if (mode === "mypage") {
+    mainContent = E("div", { style: { maxWidth: 768, margin: "0 auto", padding: "32px 24px" } }, [
+      E("div", { key: "h", style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 16 } }, E("span", { style: { fontFamily: FONT_D, color: C.paperText, fontSize: 18 } }, "📋 マイページ")),
+      E("div", { key: "stat", style: { color: C.paperTextDim, fontSize: 12, marginBottom: 16, fontFamily: FONT_M } }, `${user ? user.name : ""} さんが登録した歌詞: ${mySongs.length}曲 ・ 累計リアクション: ${mySongs.reduce((a, s) => a + (s.reactionTotal || 0), 0)}`),
+      E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } },
+        mySongs.length === 0 ? E("div", { style: { color: C.paperTextDim, fontSize: 12 } }, "まだ歌詞を登録していません。") :
+        mySongs.map((s) => E("button", { key: s.id, onClick: () => selectSong(s.id), style: { textAlign: "left", background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 4, padding: "10px 14px", cursor: "pointer" } }, [
+          E("div", { key: "t", style: { fontFamily: FONT_D, color: C.inkText, fontSize: 14 } }, s.title),
+          E("div", { key: "d", style: { fontFamily: FONT_M, color: "#5A5138", fontSize: 11, marginTop: 2 } }, `${fmtDate(s.updatedAt)} ・ ♪${s.reactionTotal || 0}`),
+        ]))
+      ),
+    ]);
+  } else if (mode === "view" && loadingSong) mainContent = E("div", { style: { color: C.paperTextDim, padding: 24, fontFamily: FONT_M } }, "読み込み中...");
+  else if (mode === "view" && selectedSong) {
+    mainContent = E("div", { style: { maxWidth: 768, margin: "0 auto", padding: "32px 24px" } }, [
+      E("div", { key: "card", style: { background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 2, padding: "28px 32px", position: "relative", boxShadow: "0 8px 24px rgba(0,0,0,0.35)" } }, [
+        E("div", { key: "head", style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 } }, [
+          E("div", { key: "titles" }, [
+            E("h1", { key: "t", style: { fontFamily: FONT_D, color: C.inkText, fontSize: 28, lineHeight: 1.3, margin: 0 } }, selectedSong.title),
+            E("div", { key: "a", style: { fontFamily: FONT_M, color: "#5A5138", fontSize: 13, marginTop: 4 } }, selectedSong.artist || "アーティスト未設定"),
+            E("div", { key: "au", style: { fontFamily: FONT_M, color: "#8A8060", fontSize: 12, marginTop: 2 } }, `歌詞作成者: ${selectedSong.authorName || "未設定"} ・ v${selectedSong.version || 1}`),
+          ]),
+          showEditControls ? E("div", { key: "ctl", style: { display: "flex", gap: 8, flexShrink: 0 } }, [
+            E("button", { key: "an", onClick: () => requestAction("annotate"), title: "パート・記号を編集", style: { background: "transparent", border: `1px solid ${C.brassDim}`, borderRadius: 4, padding: 8, cursor: "pointer", color: C.brass } }, "🎨"),
+            E("button", { key: "ed", onClick: () => requestAction("edit"), title: "編集", style: { background: C.brass, border: "none", borderRadius: 4, padding: 8, cursor: "pointer" } }, "✎"),
+            E("button", { key: "del", onClick: () => requestAction("delete"), title: "削除", style: { background: "transparent", border: `1px solid ${C.wax}`, borderRadius: 4, padding: 8, cursor: "pointer", color: C.wax } }, "🗑"),
+          ]) : (selectedSong.authorId ? E("span", { key: "lock", style: { fontSize: 10, color: C.paperTextDim, fontFamily: FONT_M, whiteSpace: "nowrap" } }, "作成者のみ編集可") : null),
+        ]),
+        selectedSong.tags && selectedSong.tags.length > 0 && E("div", { key: "tags", style: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 } }, selectedSong.tags.map((t) => E("span", { key: t, style: { fontFamily: FONT_M, fontSize: 11, color: C.waxDim, border: `1px solid ${C.waxDim}`, borderRadius: 2, padding: "1px 6px" } }, `#${t}`))),
+        E("div", { key: "lyrics", style: { borderTop: `1px dashed ${C.paperLine}`, marginTop: 18, paddingTop: 18 } }, [
+          E(LyricsRenderer, { key: "r", text: selectedSong.lyrics, parts: selectedSong.parts, marks: selectedSong.marks, partCatalog, markCatalog, interactive: false }),
+          E(Legend, { key: "lg", parts: selectedSong.parts, marks: selectedSong.marks, partCatalog, markCatalog }),
+        ]),
+        E("div", { key: "vids", style: { borderTop: `1px dashed ${C.paperLine}`, marginTop: 16, paddingTop: 14 } }, [
+          E("div", { key: "lbl", style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060", marginBottom: 6 } }, "参考動画"),
+          E(RefVideoList, { key: "list", videos: selectedSong.refVideos, canEdit: showEditControls, onRemove: removeRefVideo }),
+          showEditControls && E(RefVideoAddForm, { key: "add", onAdd: addRefVideo }),
+        ]),
+        E("div", { key: "react", style: { borderTop: `1px dashed ${C.paperLine}`, marginTop: 16, paddingTop: 14 } }, [
+          E("div", { key: "lbl", style: { fontFamily: FONT_M, fontSize: 10, color: "#8A8060", marginBottom: 6 } }, "リアクション"),
+          E(ReactionBar, { key: "bar", reactionTypes, data: reactionData, userId: user ? user.id : null, onToggle: toggleReaction }),
+        ]),
+        E("div", { key: "foot", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 24, paddingTop: 12, borderTop: `1px solid ${C.paperLine}` } }, [
+          E("span", { key: "u", style: { fontFamily: FONT_M, fontSize: 11, color: "#8A8060" } }, `最終更新: ${fmtDate(selectedSong.updatedAt)}`),
+          E("button", { key: "h", onClick: () => setShowHistory((v) => !v), style: { display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", color: C.brassDim } }, E("span", { style: { fontFamily: FONT_M, fontSize: 11 } }, `🕐 バージョン履歴 (${(selectedSong.history || []).length})`)),
+        ]),
+      ]),
+      showHistory && E("div", { key: "hist", style: { marginTop: 20, display: "flex", flexDirection: "column", gap: 8 } },
+        (selectedSong.history || []).length === 0 ? E("div", { style: { color: C.paperTextDim, fontFamily: FONT_M, fontSize: 12 } }, "まだ編集履歴はありません。") :
+        (selectedSong.history || []).map((h, i) => E("div", { key: i, style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "8px 12px" } }, [
+          E("div", { key: "l", style: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 } }, [
+            E(Stamp, { key: "s", tone: i === 0 ? "wax" : "brass" }, `v${h.version}`),
+            E("div", { key: "d", style: { minWidth: 0 } }, [
+              E("div", { key: "dt", style: { color: C.paperText, fontSize: 12, fontFamily: FONT_M } }, `${fmtDate(h.editedAt)} ・ ${h.editorName}`),
+              h.note && E("div", { key: "n", style: { color: C.paperTextDim, fontSize: 11, marginTop: 1 } }, h.note),
+            ]),
+          ]),
+          E("div", { key: "r", style: { display: "flex", gap: 8, flexShrink: 0 } }, [
+            E("button", { key: "pv", onClick: () => setPreviewEntry(previewEntry === h ? null : h), style: { fontSize: 11, color: C.brass, background: "none", border: `1px solid ${C.brassDim}`, borderRadius: 3, padding: "3px 8px", cursor: "pointer", fontFamily: FONT_M } }, previewEntry === h ? "閉じる" : "プレビュー"),
+            showEditControls && E("button", { key: "rs", onClick: () => requestAction("restore", h), style: { fontSize: 11, color: C.ink, background: C.brass, border: "none", borderRadius: 3, padding: "3px 8px", cursor: "pointer", fontFamily: FONT_M } }, "復元"),
+          ]),
+        ])).concat(previewEntry ? [E("div", { key: "prev", style: { background: C.paperShade, border: `1px solid ${C.paperLine}`, borderRadius: 3, padding: 16, fontFamily: FONT_M, color: C.inkText, fontSize: 13, lineHeight: 1.8, whiteSpace: "pre-wrap" } }, [
+          E("div", { key: "t", style: { fontFamily: FONT_D, fontSize: 16, marginBottom: 6 } }, `${previewEntry.title} ・ ${previewEntry.artist}`), previewEntry.lyrics,
+        ])] : [])
+      ),
+    ]);
+  } else if (isFormMode) {
+    mainContent = E("div", { style: { maxWidth: 768, margin: "0 auto", padding: "32px 24px" } },
+      E("div", { style: { background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 2, padding: "28px 32px", boxShadow: "0 8px 24px rgba(0,0,0,0.35)" } }, [
+        E("div", { key: "h", style: { fontFamily: FONT_D, color: C.inkText, fontSize: 18, marginBottom: 4 } }, mode === "new" ? "新しい歌詞を登録" : "歌詞を編集"),
+        E("div", { key: "au", style: { fontFamily: FONT_M, fontSize: 11, color: "#8A8060", marginBottom: 14 } }, `作成者: ${user ? user.name : ""}(ログイン中のアカウントが自動で設定されます)`),
+        err && E("div", { key: "err", style: { color: C.wax, fontSize: 12, fontFamily: FONT_M, marginBottom: 14 } }, `⚠ ${err}`),
+        E("div", { key: "fields", style: { display: "flex", flexDirection: "column", gap: 12 } }, [
+          Field("曲名 *", E("input", { value: form.title, onChange: (ev) => setForm(Object.assign({}, form, { title: ev.target.value })), style: inputStyle, placeholder: "例: 夜明けのメロディ" })),
+          Field("アーティスト", E("input", { value: form.artist, onChange: (ev) => setForm(Object.assign({}, form, { artist: ev.target.value })), style: inputStyle, placeholder: "例: 山田太郎" })),
+          Field("タグ(カンマ区切り)", E("input", { value: form.tags, onChange: (ev) => setForm(Object.assign({}, form, { tags: ev.target.value })), style: inputStyle, placeholder: "例: バラード, 2026, オリジナル" })),
+          Field("歌詞 *", E("div", null, [
+            E("textarea", { key: "ta", value: form.lyrics, onChange: (ev) => setForm(Object.assign({}, form, { lyrics: ev.target.value })), style: Object.assign({}, inputStyle, { minHeight: 260, resize: "vertical", lineHeight: 1.8 }), placeholder: "1番\n...\n\nサビ\n..." }),
+            mode === "edit" && selectedSong && ((selectedSong.parts || []).length > 0 || (selectedSong.marks || []).length > 0) && E("div", { key: "warn", style: { color: C.waxDim, fontSize: 11, fontFamily: FONT_M, marginTop: 4 } }, "⚠ 歌詞本文を変更すると、パート分け・歌唱記号はリセットされます。"),
+          ])),
+          mode === "edit" && Field("編集メモ(履歴に残ります・任意)", E("input", { value: form.note, onChange: (ev) => setForm(Object.assign({}, form, { note: ev.target.value })), style: inputStyle, placeholder: "例: 2番のサビを修正" })),
+        ]),
+        E("div", { key: "actions", style: { display: "flex", gap: 8, marginTop: 20 } }, [
+          E("button", { key: "save", onClick: saveForm, disabled: saving, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 5, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 } }, saving ? "保存中..." : "💾 保存する"),
+          E("button", { key: "cancel", onClick: cancelForm, style: { background: "transparent", color: C.paperTextDim, border: `1px solid ${C.paperLine}`, borderRadius: 5, padding: "9px 16px", fontSize: 13, cursor: "pointer" } }, "✕ キャンセル"),
+        ]),
+      ])
+    );
+  } else if (mode === "annotate" && selectedSong) {
+    mainContent = E("div", { style: { maxWidth: 768, margin: "0 auto", padding: "32px 24px" } }, [
+      E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 } }, [
+        E("span", { key: "t", style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, "✨ パート・歌唱記号を編集"),
+        E("div", { key: "btns", style: { display: "flex", gap: 8 } }, [
+          E("button", { key: "p", onClick: () => setCatalogModal("part"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ パート色を管理"),
+          E("button", { key: "m", onClick: () => setCatalogModal("mark"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ 記号タイプを管理"),
+        ]),
+      ]),
+      E("p", { key: "desc", style: { fontFamily: FONT_B, fontSize: 12, color: C.paperTextDim, marginBottom: 12, lineHeight: 1.7 } }, "歌詞の一部をドラッグして選択すると、下にツールバーが表示されます。装飾済みの範囲を選んで「解除」を押すと削除できます。"),
+      E("div", { key: "card", style: { background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 2, padding: "24px 28px", boxShadow: "0 8px 24px rgba(0,0,0,0.35)" } },
+        E(LyricsRenderer, { text: selectedSong.lyrics, parts: draftParts, marks: draftMarks, partCatalog, markCatalog, interactive: true, containerRef: annotateRef, onMouseUp: handleMouseUp })
+      ),
+      selRange && E("div", { key: "tool", style: { marginTop: 16, background: C.inkPanel, border: `1px solid ${C.brassDim}`, borderRadius: 6, padding: "14px 16px" } }, [
+        E("div", { key: "sel", style: { fontFamily: FONT_M, fontSize: 11, color: C.paperTextDim, marginBottom: 8 } }, `選択中 (${selRange.end - selRange.start}文字): 「${selectedSong.lyrics.slice(selRange.start, selRange.end).slice(0, 24)}${selRange.end - selRange.start > 24 ? "…" : ""}」`),
+        E("div", { key: "parts", style: { marginBottom: 10 } }, [
+          E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 5, fontFamily: FONT_M } }, "パートを塗る"),
+          E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, partCatalog.map((p) => E("button", { key: p.id, onClick: () => applyPart(p.id), style: { display: "flex", alignItems: "center", gap: 6, background: C.ink, border: `1px solid ${p.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, E("span", { style: { width: 9, height: 9, borderRadius: 2, background: p.color, display: "inline-block" } }), E("span", { style: { fontSize: 11, color: C.paperText, fontFamily: FONT_B } }, p.label)))),
+        ]),
+        E("div", { key: "marks", style: { marginBottom: 12 } }, [
+          E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 5, fontFamily: FONT_M } }, "歌唱記号を付ける"),
+          E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, markCatalog.map((m) => E("button", { key: m.id, onClick: () => applyMark(m.id), style: { display: "flex", alignItems: "center", gap: 6, background: C.ink, border: `1px solid ${m.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, E("span", { style: { fontSize: 11, color: m.color, fontWeight: 700 } }, m.symbol), E("span", { style: { fontSize: 11, color: C.paperText, fontFamily: FONT_B } }, m.label)))),
+        ]),
+        E("div", { key: "act", style: { display: "flex", gap: 8 } }, [
+          E("button", { key: "clr", onClick: clearSelection, style: { fontSize: 11, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 4, padding: "5px 10px", cursor: "pointer" } }, "選択範囲の装飾を解除"),
+          E("button", { key: "cls", onClick: () => { setSelRange(null); const s = window.getSelection(); if (s) s.removeAllRanges(); }, style: { fontSize: 11, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 10px", cursor: "pointer" } }, "閉じる"),
+        ]),
+      ]),
+      E(Legend, { key: "legend", parts: draftParts, marks: draftMarks, partCatalog, markCatalog }),
+      E("div", { key: "actions", style: { display: "flex", gap: 8, marginTop: 20 } }, [
+        E("button", { key: "save", onClick: saveAnnotations, disabled: saving, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 5, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 } }, saving ? "保存中..." : "💾 保存する"),
+        E("button", { key: "cancel", onClick: () => setMode("view"), style: { background: "transparent", color: C.paperTextDim, border: `1px solid ${C.paperLine}`, borderRadius: 5, padding: "9px 16px", fontSize: 13, cursor: "pointer" } }, "✕ キャンセル"),
+      ]),
+    ]);
+  }
+
+  const mainPanel = E("div", { style: { display: showMain ? "flex" : "none", flexDirection: "column", flex: 1, height: "100%", overflow: "hidden" } }, [
+    isMobile && E("div", { key: "back", style: { display: "flex", alignItems: "center", gap: 8, padding: "12px 16px", borderBottom: `1px solid ${C.inkBorder}` } },
+      E("button", { onClick: () => setMobileListOpen(true), style: { color: C.paperText, background: "none", border: "none", fontSize: 16, cursor: "pointer" } }, "← 一覧に戻る")),
+    E("div", { key: "content", style: { flex: 1, overflowY: "auto" } }, mainContent),
+  ]);
+
+  return E("div", { style: { width: "100%", height: "100vh", display: "flex", overflow: "hidden", background: C.ink } }, [
+    sidebar, mainPanel,
+    legacyGate && E(LegacyPinGate, { key: "legacy", onSubmit: submitLegacyGate, onCancel: () => setLegacyGate(null), error: legacyGateError, busy: legacyGateBusy }),
+    catalogModal === "part" && E(CatalogModal, { key: "catp", title: "パート色を管理", items: partCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("part"), onUpdate: (id, patch) => updateCatalogItem("part", id, patch), onDelete: (id) => deleteCatalogItem("part", id) }),
+    catalogModal === "mark" && E(CatalogModal, { key: "catm", title: "歌唱記号タイプを管理", items: markCatalog, hasSymbol: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("mark"), onUpdate: (id, patch) => updateCatalogItem("mark", id, patch), onDelete: (id) => deleteCatalogItem("mark", id) }),
+  ]);
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(E(LyricsArchive));
+</script>
+</body>
+</html>
