@@ -269,11 +269,12 @@ function getClickOffset(container, clientX, clientY) {
   if (!container.contains(node) || isInSkip(node, container)) return null;
   return nodeOffsetToTextOffset(container, node, offset);
 }
-function buildSegments(text, parts, marks, pointMarks) {
+function buildSegments(text, parts, marks, pointMarks, rubies) {
   const breakpoints = new Set([0, text.length]);
   (parts || []).forEach((p) => { breakpoints.add(p.start); breakpoints.add(p.end); });
   (marks || []).forEach((m) => { breakpoints.add(m.start); breakpoints.add(m.end); });
   (pointMarks || []).forEach((pt) => { breakpoints.add(pt.position); });
+  (rubies || []).forEach((r) => { breakpoints.add(r.start); breakpoints.add(r.end); });
   const sorted = Array.from(breakpoints).filter((n) => n >= 0 && n <= text.length).sort((a, b) => a - b);
   const segments = [];
   for (let i = 0; i < sorted.length - 1; i++) {
@@ -281,10 +282,78 @@ function buildSegments(text, parts, marks, pointMarks) {
     if (s === e) continue;
     const part = (parts || []).find((p) => p.start <= s && p.end >= e);
     const marksHere = (marks || []).filter((m) => m.start <= s && m.end >= e);
-    segments.push({ start: s, end: e, text: text.slice(s, e), part, marksHere });
+    const ruby = (rubies || []).find((r) => r.start <= s && r.end >= e);
+    segments.push({ start: s, end: e, text: text.slice(s, e), part, marksHere, ruby });
   }
-  if (segments.length === 0 && text.length > 0) segments.push({ start: 0, end: text.length, text, part: null, marksHere: [] });
+  if (segments.length === 0 && text.length > 0) segments.push({ start: 0, end: text.length, text, part: null, marksHere: [], ruby: null });
   return segments;
+}
+
+// ---------- automatic furigana (kuromoji.js を遅延読み込みして自動でルビ候補を生成する) ----------
+let kuromojiTokenizerPromise = null;
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const el = document.createElement("script");
+    el.src = src; el.onload = () => resolve(); el.onerror = () => reject(new Error("スクリプトの読み込みに失敗しました: " + src));
+    document.head.appendChild(el);
+  });
+}
+// 初回呼び出し時だけCDNからkuromoji本体+辞書(数MB)を取得する。以後はページ内で使い回す(失敗時は次回リトライできるようキャッシュをクリア)。
+function getKuromojiTokenizer() {
+  if (kuromojiTokenizerPromise) return kuromojiTokenizerPromise;
+  kuromojiTokenizerPromise = loadScriptOnce("https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js")
+    .then(() => new Promise((resolve, reject) => {
+      window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, tokenizer) => {
+        if (err) reject(err); else resolve(tokenizer);
+      });
+    }))
+    .catch((e) => { kuromojiTokenizerPromise = null; throw e; });
+  return kuromojiTokenizerPromise;
+}
+function kataToHira(str) { return str.replace(/[\u30A1-\u30F6]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0x60)); }
+function hasKanji(str) { return /[\u4E00-\u9FFF々〆〤]/.test(str); }
+function isHiraganaChar(ch) { return ch >= "\u3040" && ch <= "\u309F"; }
+// 単語の表記(surface)と読み(reading, ひらがな)から、送り仮名を除いた「漢字コア」部分だけを取り出す。
+// 例: surface="食べる", reading="たべる" -> { 表記中の位置=[0,1)("食"), reading="た" }
+function kanjiCoreOfToken(surface, readingHiragana) {
+  if (!readingHiragana || readingHiragana === "*") return null;
+  let startTrim = 0;
+  while (startTrim < surface.length && startTrim < readingHiragana.length &&
+    isHiraganaChar(surface[startTrim]) && surface[startTrim] === readingHiragana[startTrim]) startTrim++;
+  let endTrim = 0;
+  while (endTrim < surface.length - startTrim && endTrim < readingHiragana.length - startTrim &&
+    isHiraganaChar(surface[surface.length - 1 - endTrim]) && surface[surface.length - 1 - endTrim] === readingHiragana[readingHiragana.length - 1 - endTrim]) endTrim++;
+  const coreStart = startTrim, coreEnd = surface.length - endTrim;
+  if (coreStart >= coreEnd) return null;
+  const coreSurface = surface.slice(coreStart, coreEnd);
+  if (!hasKanji(coreSurface)) return null;
+  return { offsetStart: coreStart, offsetEnd: coreEnd, reading: readingHiragana.slice(startTrim, readingHiragana.length - endTrim) };
+}
+function overlapsAnyRange(start, end, ranges) { return (ranges || []).some((r) => start < r.end && end > r.start); }
+// 歌詞全文をトークナイズし、漢字を含む単語ごとにルビ候補を作る。existingRubiesと範囲が重なる候補は除外する(既存の手動ルビを上書きしない)。
+function buildAutoRubies(text, tokenizer, existingRubies) {
+  const tokens = tokenizer.tokenize(text);
+  const occupied = (existingRubies || []).slice();
+  const results = [];
+  let cursor = 0;
+  tokens.forEach((tok) => {
+    const surface = tok.surface_form;
+    if (!surface) return;
+    const start = text.indexOf(surface, cursor);
+    if (start === -1) return; // 位置がズレた場合は安全のためスキップ(自動生成なので取りこぼしても手動で追加可能)
+    cursor = start + surface.length;
+    if (!hasKanji(surface)) return;
+    const reading = tok.reading ? kataToHira(tok.reading) : null;
+    const core = kanjiCoreOfToken(surface, reading);
+    if (!core) return;
+    const absStart = start + core.offsetStart, absEnd = start + core.offsetEnd;
+    if (overlapsAnyRange(absStart, absEnd, occupied)) return;
+    const entry = { id: newId(), start: absStart, end: absEnd, text: core.reading };
+    results.push(entry);
+    occupied.push(entry);
+  });
+  return results;
 }
 
 // ---------- youtube reference videos (oEmbed, no API key required) ----------
@@ -342,8 +411,8 @@ function PinInput(value, onChange) {
   });
 }
 
-function LyricsRenderer({ text, parts, marks, points, partCatalog, markCatalog, pointCatalog, interactive, containerRef, onMouseUp, onTouchEnd }) {
-  const segments = useMemo(() => buildSegments(text || "", parts, marks, points), [text, parts, marks, points]);
+function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markCatalog, pointCatalog, interactive, containerRef, onMouseUp, onTouchEnd }) {
+  const segments = useMemo(() => buildSegments(text || "", parts, marks, points, rubies), [text, parts, marks, points, rubies]);
   const pointsByPos = useMemo(() => {
     const map = {};
     (points || []).forEach((pt) => { (map[pt.position] = map[pt.position] || []).push(pt); });
@@ -365,16 +434,21 @@ function LyricsRenderer({ text, parts, marks, points, partCatalog, markCatalog, 
   segments.forEach((seg, i) => {
     const partDef = seg.part ? (partCatalog || []).find((p) => p.id === seg.part.colorId) : null;
     const markDefs = (seg.marksHere || []).map((m) => (markCatalog || []).find((mc) => mc.id === m.typeId)).filter(Boolean);
-    nodes.push(E("span", {
-      key: "seg-" + i,
-      title: markDefs.length ? markDefs.map((m) => m.label).join(" / ") : undefined,
-      style: {
-        borderBottom: partDef ? `3px solid ${partDef.color}` : "none",
-        paddingBottom: partDef ? 1 : 0,
-        backgroundColor: markDefs.length ? `${markDefs[0].color}4D` : "transparent",
-        borderRadius: 2,
-      },
-    }, seg.text));
+    const segStyle = {
+      borderBottom: partDef ? `3px solid ${partDef.color}` : "none",
+      paddingBottom: partDef ? 1 : 0,
+      backgroundColor: markDefs.length ? `${markDefs[0].color}4D` : "transparent",
+      borderRadius: 2,
+    };
+    const title = markDefs.length ? markDefs.map((m) => m.label).join(" / ") : undefined;
+    if (seg.ruby && seg.ruby.text) {
+      nodes.push(E("ruby", { key: "seg-" + i, title }, [
+        E("span", { key: "base", style: segStyle }, seg.text),
+        E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, fontWeight: 500, color: "#8A6D3C", userSelect: "none" } }, seg.ruby.text),
+      ]));
+    } else {
+      nodes.push(E("span", { key: "seg-" + i, title, style: segStyle }, seg.text));
+    }
     nodes.push(E(React.Fragment, { key: "pt-" + seg.end }, renderPointsAt(seg.end)));
   });
   return E("div", {
@@ -543,6 +617,10 @@ function LyricsArchive() {
   const [draftParts, setDraftParts] = useState([]);
   const [draftMarks, setDraftMarks] = useState([]);
   const [draftPoints, setDraftPoints] = useState([]);
+  const [draftRubies, setDraftRubies] = useState([]);
+  const [rubyText, setRubyText] = useState("");
+  const [autoRubyBusy, setAutoRubyBusy] = useState(false);
+  const [autoRubyError, setAutoRubyError] = useState("");
   const [selRange, setSelRange] = useState(null);
   const [selRect, setSelRect] = useState(null);
   const [paintPart, setPaintPart] = useState(null);
@@ -680,8 +758,8 @@ function LyricsArchive() {
   function cancelForm() { setMode(selectedSong ? "view" : "empty"); }
   function openAnnotate() {
     if (!selectedSong) return;
-    setDraftParts(selectedSong.parts || []); setDraftMarks(selectedSong.marks || []); setDraftPoints(selectedSong.points || []);
-    setSelRange(null); setSelRect(null); setPaintPart(null); setStampType(null); setMode("annotate");
+    setDraftParts(selectedSong.parts || []); setDraftMarks(selectedSong.marks || []); setDraftPoints(selectedSong.points || []); setDraftRubies(selectedSong.rubies || []);
+    setSelRange(null); setSelRect(null); setPaintPart(null); setStampType(null); setRubyText(""); setAutoRubyError(""); setMode("annotate");
   }
 
   async function saveForm() {
@@ -694,7 +772,7 @@ function LyricsArchive() {
     try {
       if (mode === "new") {
         const id = newId();
-        const song = { id, title, artist, tags, lyrics, authorId: user.id, authorName: user.name, version: 1, lastEditorId: user.id, lastEditorName: user.name, parts: [], marks: [], points: [], refVideos: [], createdAt: now, updatedAt: now, history: [], reactionTotal: 0 };
+        const song = { id, title, artist, tags, lyrics, authorId: user.id, authorName: user.name, version: 1, lastEditorId: user.id, lastEditorName: user.name, parts: [], marks: [], points: [], rubies: [], refVideos: [], createdAt: now, updatedAt: now, history: [], reactionTotal: 0 };
         await setSong(song);
         await refreshIndex();
         setSelectedSong(song); setSelectedId(id); setReactionData({ counts: {}, users: {} }); setMode("view");
@@ -709,7 +787,7 @@ function LyricsArchive() {
           title, artist, tags, lyrics,
           authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name,
           version: (selectedSong.version || 1) + 1, lastEditorId: user.id, lastEditorName: user.name,
-          parts: textChanged ? [] : (selectedSong.parts || []), marks: textChanged ? [] : (selectedSong.marks || []), points: textChanged ? [] : (selectedSong.points || []),
+          parts: textChanged ? [] : (selectedSong.parts || []), marks: textChanged ? [] : (selectedSong.marks || []), points: textChanged ? [] : (selectedSong.points || []), rubies: textChanged ? [] : (selectedSong.rubies || []),
           updatedAt: now, history,
         });
         await setSong(updated);
@@ -746,6 +824,14 @@ function LyricsArchive() {
     document.addEventListener("selectionchange", onSelChange);
     return () => document.removeEventListener("selectionchange", onSelChange);
   }, [mode]);
+
+  // 選択範囲が変わるたびに、ルビ入力欄をその範囲の既存ルビ(あれば)の内容にリセットする
+  useEffect(() => {
+    if (!selRange) { setRubyText(""); return; }
+    const existing = draftRubies.find((r) => r.start === selRange.start && r.end === selRange.end);
+    setRubyText(existing ? existing.text : "");
+    // eslint-disable-next-line
+  }, [selRange ? `${selRange.start}:${selRange.end}` : null]);
 
   function applyPart(colorId, rangeOverride) {
     const r = rangeOverride || selRange;
@@ -794,17 +880,46 @@ function LyricsArchive() {
     if (!selRange) return;
     setDraftMarks((prev) => prev.filter((m) => !(m.typeId === typeId && !(m.end <= selRange.start || m.start >= selRange.end))).concat([{ id: newId(), start: selRange.start, end: selRange.end, typeId }]));
   }
+  // ルビは範囲(選択したまま)に対して1個まで。同じ範囲に既存ルビがあれば置き換え(編集)、
+  // 一部でも重なる別範囲のルビがあればそちらは残す(範囲がズレている限り共存できる)。
+  function applyRuby(text) {
+    if (!selRange) return;
+    const trimmed = (text || "").trim();
+    if (!trimmed) return;
+    setDraftRubies((prev) => prev.filter((r) => !(r.start === selRange.start && r.end === selRange.end)).concat([{ id: newId(), start: selRange.start, end: selRange.end, text: trimmed }]));
+  }
+  function deleteRubyInSelection() {
+    if (!selRange) return;
+    setDraftRubies((prev) => prev.filter((r) => !(r.start === selRange.start && r.end === selRange.end)));
+    setRubyText("");
+  }
+  // 歌詞全文を解析し、まだルビが振られていない漢字箇所にだけ自動でルビ候補を追加する(既存ルビは上書きしない)。
+  async function runAutoRuby() {
+    if (!selectedSong) return;
+    if (!confirm("歌詞全体を解析し、まだルビが振られていない漢字に読みを自動で振ります。\n既にルビがある範囲はそのまま残ります。よろしいですか?\n(初回は辞書データの読み込みに数秒かかります)")) return;
+    setAutoRubyBusy(true); setAutoRubyError("");
+    try {
+      const tokenizer = await getKuromojiTokenizer();
+      const suggestions = buildAutoRubies(selectedSong.lyrics, tokenizer, draftRubies);
+      setDraftRubies((prev) => prev.concat(suggestions));
+      if (suggestions.length === 0) setAutoRubyError("新たに追加できるルビは見つかりませんでした。");
+    } catch (e) {
+      setAutoRubyError("自動ルビの読み込みに失敗しました。ネットワーク環境をご確認のうえ、もう一度お試しください。");
+    }
+    setAutoRubyBusy(false);
+  }
   function clearSelection() {
     if (!selRange) return;
     setDraftParts((prev) => prev.filter((p) => p.end <= selRange.start || p.start >= selRange.end));
     setDraftMarks((prev) => prev.filter((m) => m.end <= selRange.start || m.start >= selRange.end));
     setDraftPoints((prev) => prev.filter((pt) => pt.position < selRange.start || pt.position > selRange.end));
+    setDraftRubies((prev) => prev.filter((r) => r.end <= selRange.start || r.start >= selRange.end));
     const s = window.getSelection(); if (s) s.removeAllRanges();
   }
   function closeToolbar() { const s = window.getSelection(); if (s) s.removeAllRanges(); }
   async function saveAnnotations() {
     setSaving(true);
-    const updated = Object.assign({}, selectedSong, { parts: draftParts, marks: draftMarks, points: draftPoints, authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name, updatedAt: new Date().toISOString() });
+    const updated = Object.assign({}, selectedSong, { parts: draftParts, marks: draftMarks, points: draftPoints, rubies: draftRubies, authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name, updatedAt: new Date().toISOString() });
     await setSong(updated);
     await refreshIndex();
     setSelectedSong(updated); setMode("view"); setSaving(false);
@@ -964,7 +1079,7 @@ function LyricsArchive() {
         ]),
         selectedSong.tags && selectedSong.tags.length > 0 && E("div", { key: "tags", style: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 } }, selectedSong.tags.map((t) => E("span", { key: t, style: { fontFamily: FONT_M, fontSize: 11, color: C.waxDim, border: `1px solid ${C.waxDim}`, borderRadius: 2, padding: "1px 6px" } }, `#${t}`))),
         E("div", { key: "lyrics", style: { borderTop: `1px dashed ${C.paperLine}`, marginTop: 18, paddingTop: 18 } }, [
-          E(LyricsRenderer, { key: "r", text: selectedSong.lyrics, parts: selectedSong.parts, marks: selectedSong.marks, points: selectedSong.points, partCatalog, markCatalog, pointCatalog, interactive: false }),
+          E(LyricsRenderer, { key: "r", text: selectedSong.lyrics, parts: selectedSong.parts, marks: selectedSong.marks, points: selectedSong.points, rubies: selectedSong.rubies, partCatalog, markCatalog, pointCatalog, interactive: false }),
           E(Legend, { key: "lg", parts: selectedSong.parts, marks: selectedSong.marks, points: selectedSong.points, partCatalog, markCatalog, pointCatalog }),
         ]),
         E("div", { key: "vids", style: { borderTop: `1px dashed ${C.paperLine}`, marginTop: 16, paddingTop: 14 } }, [
@@ -1012,7 +1127,7 @@ function LyricsArchive() {
           Field("タグ(カンマ区切り)", E("input", { value: form.tags, onChange: (ev) => setForm(Object.assign({}, form, { tags: ev.target.value })), style: inputStyle, placeholder: "例: バラード, 2026, オリジナル" })),
           Field("歌詞 *", E("div", null, [
             E("textarea", { key: "ta", value: form.lyrics, onChange: (ev) => setForm(Object.assign({}, form, { lyrics: ev.target.value })), style: Object.assign({}, inputStyle, { minHeight: 260, resize: "vertical", lineHeight: 1.8 }), placeholder: "1番\n...\n\nサビ\n..." }),
-            mode === "edit" && selectedSong && ((selectedSong.parts || []).length > 0 || (selectedSong.marks || []).length > 0) && E("div", { key: "warn", style: { color: C.waxDim, fontSize: 11, fontFamily: FONT_M, marginTop: 4 } }, "⚠ 歌詞本文を変更すると、パート分け・歌唱記号はリセットされます。"),
+            mode === "edit" && selectedSong && ((selectedSong.parts || []).length > 0 || (selectedSong.marks || []).length > 0) && E("div", { key: "warn", style: { color: C.waxDim, fontSize: 11, fontFamily: FONT_M, marginTop: 4 } }, "⚠ 歌詞本文を変更すると、パート分け・歌唱記号・ルビはリセットされます。"),
           ])),
           mode === "edit" && Field("編集メモ(履歴に残ります・任意)", E("input", { value: form.note, onChange: (ev) => setForm(Object.assign({}, form, { note: ev.target.value })), style: inputStyle, placeholder: "例: 2番のサビを修正" })),
         ]),
@@ -1053,21 +1168,24 @@ function LyricsArchive() {
         E("button", { key: "off", onClick: () => setStampType(null), style: { fontSize: 10, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 3, padding: "2px 7px", cursor: "pointer" } }, "解除"),
       ]),
     ]);
-    const header = E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 } }, [
+    const header = E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 } }, [
       E("span", { key: "t", style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, "✨ パート・記号を編集"),
       E("div", { key: "btns", style: { display: "flex", gap: 8, flexWrap: "wrap" } }, [
+        E("button", { key: "auto", onClick: runAutoRuby, disabled: autoRubyBusy, style: { fontSize: 11, color: C.ink, background: C.brass, border: "none", borderRadius: 4, padding: "5px 9px", cursor: autoRubyBusy ? "default" : "pointer", opacity: autoRubyBusy ? 0.6 : 1, fontWeight: 600 } }, autoRubyBusy ? "解析中..." : "🪄 自動でルビを振る"),
         E("button", { key: "p", onClick: () => { closeToolbar(); setCatalogModal("part"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ パート色を管理"),
         E("button", { key: "m", onClick: () => { closeToolbar(); setCatalogModal("mark"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ マーカーを管理"),
         E("button", { key: "pt", onClick: () => { closeToolbar(); setCatalogModal("point"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ 記号を管理"),
       ]),
     ]);
+    const autoRubyErrRow = autoRubyError && E("div", { key: "autoerr", style: { fontFamily: FONT_M, fontSize: 11, color: C.wax, marginBottom: 8 } }, `⚠ ${autoRubyError}`);
     const leftColumn = E("div", { key: "left", style: { flex: 1, minWidth: 0, maxWidth: isWideScreen ? 768 : "none" } }, [
       header,
+      autoRubyErrRow,
       !isWideScreen && paintPanel,
       !isWideScreen && stampPanel,
       E("p", { key: "desc", style: { fontFamily: FONT_B, fontSize: 12, color: C.paperTextDim, marginBottom: 12, lineHeight: 1.7 } }, "①②を使わずに歌詞をドラッグして選択した場合は、選択箇所の近くにマーカー用のツールバーが出ます。"),
       E("div", { key: "card", style: { background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 2, padding: "24px 28px", boxShadow: "0 8px 24px rgba(0,0,0,0.35)" } },
-        E(LyricsRenderer, { text: selectedSong.lyrics, parts: draftParts, marks: draftMarks, points: draftPoints, partCatalog, markCatalog, pointCatalog, interactive: true, containerRef: annotateRef, onMouseUp: handlePointerCommit, onTouchEnd: handlePointerCommit })
+        E(LyricsRenderer, { text: selectedSong.lyrics, parts: draftParts, marks: draftMarks, points: draftPoints, rubies: draftRubies, partCatalog, markCatalog, pointCatalog, interactive: true, containerRef: annotateRef, onMouseUp: handlePointerCommit, onTouchEnd: handlePointerCommit })
       ),
       E(Legend, { key: "legend", parts: draftParts, marks: draftMarks, points: draftPoints, partCatalog, markCatalog, pointCatalog }),
       E("div", { key: "actions", style: { display: "flex", gap: 8, marginTop: 20 } }, [
@@ -1085,7 +1203,7 @@ function LyricsArchive() {
       mainContent,
       selRange && selRect && !paintPart && !stampType && E("div", {
         key: "floatbar",
-        onMouseDown: (ev) => ev.preventDefault(),
+        onMouseDown: (ev) => { if (ev.target.tagName !== "INPUT" && ev.target.tagName !== "TEXTAREA") ev.preventDefault(); },
         style: {
           position: "fixed", zIndex: 60, width: "min(300px, 92vw)",
           left: toolbarLeft, top: showAbove ? Math.max(8, selRect.top - 8) : Math.min(window.innerHeight - 8, selRect.bottom + 8),
@@ -1098,6 +1216,18 @@ function LyricsArchive() {
         E("div", { key: "marks", style: { marginBottom: 8 } }, [
           E("div", { key: "l", style: { fontSize: 9, color: "#8A8060", marginBottom: 4, fontFamily: FONT_M } }, "マーカー(選択範囲をハイライト)"),
           E("div", { key: "row", style: { display: "flex", gap: 5, flexWrap: "wrap" } }, markCatalog.map((m) => E("button", { key: m.id, onClick: () => applyMark(m.id), style: { fontSize: 11, color: C.paperText, fontFamily: FONT_B, background: `${m.color}33`, border: `1px solid ${m.color}`, borderRadius: 12, padding: "4px 9px", cursor: "pointer" } }, m.label))),
+        ]),
+        E("div", { key: "ruby", style: { marginBottom: 8 } }, [
+          E("div", { key: "l", style: { fontSize: 9, color: "#8A8060", marginBottom: 4, fontFamily: FONT_M } }, "ルビ(よみがな)"),
+          E("div", { key: "row", style: { display: "flex", gap: 5 } }, [
+            E("input", {
+              key: "in", value: rubyText, onChange: (ev) => setRubyText(ev.target.value),
+              placeholder: "例: あ", onKeyDown: (ev) => { if (ev.key === "Enter") applyRuby(rubyText); },
+              style: { flex: 1, minWidth: 0, background: C.ink, border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 8px", color: C.paperText, fontFamily: FONT_M, fontSize: 12, outline: "none" },
+            }),
+            E("button", { key: "add", onClick: () => applyRuby(rubyText), disabled: !rubyText.trim(), style: { fontSize: 10, color: C.ink, background: C.brass, border: "none", borderRadius: 4, padding: "5px 9px", cursor: rubyText.trim() ? "pointer" : "default", opacity: rubyText.trim() ? 1 : 0.5, whiteSpace: "nowrap" } }, draftRubies.some((r) => r.start === selRange.start && r.end === selRange.end) ? "更新" : "追加"),
+            draftRubies.some((r) => r.start === selRange.start && r.end === selRange.end) && E("button", { key: "del", onClick: deleteRubyInSelection, style: { fontSize: 10, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer", whiteSpace: "nowrap" } }, "削除"),
+          ]),
         ]),
         E("div", { key: "act", style: { display: "flex", gap: 6 } }, [
           E("button", { key: "clr", onClick: clearSelection, style: { fontSize: 10, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 4, padding: "4px 9px", cursor: "pointer" } }, "選択範囲の装飾を解除"),
