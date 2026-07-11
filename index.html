@@ -291,6 +291,15 @@ function buildSegments(text, parts, marks, pointMarks, rubies) {
 
 // ---------- automatic furigana (kuromoji.js を遅延読み込みして自動でルビ候補を生成する) ----------
 let kuromojiTokenizerPromise = null;
+function withTimeout(promise, ms, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message || "タイムアウトしました")), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
 function loadScriptOnce(src) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
@@ -299,7 +308,9 @@ function loadScriptOnce(src) {
     document.head.appendChild(el);
   });
 }
-// 初回呼び出し時だけCDNからkuromoji本体+辞書(数MB)を取得する。以後はページ内で使い回す(失敗時は次回リトライできるようキャッシュをクリア)。
+// 初回呼び出し時だけCDNからkuromoji本体+辞書(数MB)を取得する。以後はページ内で使い回す。
+// モバイル回線などで通信が詰まって固まったように見えるのを防ぐため、呼び出し側(runAutoRuby)でタイムアウトを掛ける。
+// タイムアウト/失敗時は resetKuromojiTokenizer() で状態をクリアし、次回また最初から取得できるようにする。
 function getKuromojiTokenizer() {
   if (kuromojiTokenizerPromise) return kuromojiTokenizerPromise;
   kuromojiTokenizerPromise = loadScriptOnce("https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js")
@@ -307,10 +318,10 @@ function getKuromojiTokenizer() {
       window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, tokenizer) => {
         if (err) reject(err); else resolve(tokenizer);
       });
-    }))
-    .catch((e) => { kuromojiTokenizerPromise = null; throw e; });
+    }));
   return kuromojiTokenizerPromise;
 }
+function resetKuromojiTokenizer() { kuromojiTokenizerPromise = null; }
 function kataToHira(str) { return str.replace(/[\u30A1-\u30F6]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0x60)); }
 function hasKanji(str) { return /[\u4E00-\u9FFF々〆〤]/.test(str); }
 function isHiraganaChar(ch) { return ch >= "\u3040" && ch <= "\u309F"; }
@@ -621,11 +632,13 @@ function LyricsArchive() {
   const [rubyText, setRubyText] = useState("");
   const [autoRubyBusy, setAutoRubyBusy] = useState(false);
   const [autoRubyError, setAutoRubyError] = useState("");
+  const [autoRubyStatus, setAutoRubyStatus] = useState("");
   const [selRange, setSelRange] = useState(null);
   const [selRect, setSelRect] = useState(null);
   const [paintPart, setPaintPart] = useState(null);
   const [stampType, setStampType] = useState(null);
   const annotateRef = useRef(null);
+  const toolbarRef = useRef(null);
 
   const [reactionData, setReactionData] = useState({ counts: {}, users: {} });
 
@@ -813,7 +826,13 @@ function LyricsArchive() {
     if (mode !== "annotate") { setSelRange(null); setSelRect(null); return; }
     function onSelChange() {
       const off = getSelectionOffsets(annotateRef.current);
-      if (!off) { setSelRange(null); setSelRect(null); return; }
+      if (!off) {
+        // ツールバー内の要素(ルビ入力欄など)にフォーカスしている場合、ブラウザは元のテキスト選択を解除するが、
+        // それを「選択解除」とみなしてツールバーごと閉じてしまうと入力欄に文字が打てなくなる。
+        // フォーカスがツールバー内にある間は、直前の選択範囲を維持したままにする。
+        if (toolbarRef.current && document.activeElement && toolbarRef.current.contains(document.activeElement)) return;
+        setSelRange(null); setSelRect(null); return;
+      }
       setSelRange(off);
       try {
         const sel = window.getSelection();
@@ -894,19 +913,26 @@ function LyricsArchive() {
     setRubyText("");
   }
   // 歌詞全文を解析し、まだルビが振られていない漢字箇所にだけ自動でルビ候補を追加する(既存ルビは上書きしない)。
+  // モバイル回線などで辞書のダウンロードが詰まった場合に「解析中...」のまま固まって見えないよう、タイムアウトと状態表示を行う。
   async function runAutoRuby() {
     if (!selectedSong) return;
-    if (!confirm("歌詞全体を解析し、まだルビが振られていない漢字に読みを自動で振ります。\n既にルビがある範囲はそのまま残ります。よろしいですか?\n(初回は辞書データの読み込みに数秒かかります)")) return;
-    setAutoRubyBusy(true); setAutoRubyError("");
+    if (!confirm("歌詞全体を解析し、まだルビが振られていない漢字に読みを自動で振ります。\n既にルビがある範囲はそのまま残ります。よろしいですか?\n(初回は辞書データ(数MB)の読み込みが必要です。Wi-Fi環境を推奨します)")) return;
+    setAutoRubyBusy(true); setAutoRubyError(""); setAutoRubyStatus("辞書を読み込み中...(初回は数十秒かかることがあります)");
     try {
-      const tokenizer = await getKuromojiTokenizer();
+      const tokenizer = await withTimeout(getKuromojiTokenizer(), 60000, "辞書の読み込みがタイムアウトしました");
+      setAutoRubyStatus("歌詞を解析中...");
       const suggestions = buildAutoRubies(selectedSong.lyrics, tokenizer, draftRubies);
       setDraftRubies((prev) => prev.concat(suggestions));
       if (suggestions.length === 0) setAutoRubyError("新たに追加できるルビは見つかりませんでした。");
     } catch (e) {
-      setAutoRubyError("自動ルビの読み込みに失敗しました。ネットワーク環境をご確認のうえ、もう一度お試しください。");
+      resetKuromojiTokenizer(); // 次回また最初から取得し直せるようにする
+      if (e && e.message === "辞書の読み込みがタイムアウトしました") {
+        setAutoRubyError("辞書の読み込みに時間がかかりすぎたため中断しました。通信環境の良い場所(Wi-Fiなど)でもう一度お試しください。");
+      } else {
+        setAutoRubyError("自動ルビの生成に失敗しました。もう一度お試しください。");
+      }
     }
-    setAutoRubyBusy(false);
+    setAutoRubyStatus(""); setAutoRubyBusy(false);
   }
   function clearSelection() {
     if (!selRange) return;
@@ -916,7 +942,11 @@ function LyricsArchive() {
     setDraftRubies((prev) => prev.filter((r) => r.end <= selRange.start || r.start >= selRange.end));
     const s = window.getSelection(); if (s) s.removeAllRanges();
   }
-  function closeToolbar() { const s = window.getSelection(); if (s) s.removeAllRanges(); }
+  function closeToolbar() {
+    const s = window.getSelection(); if (s) s.removeAllRanges();
+    if (document.activeElement && toolbarRef.current && toolbarRef.current.contains(document.activeElement)) document.activeElement.blur();
+    setSelRange(null); setSelRect(null);
+  }
   async function saveAnnotations() {
     setSaving(true);
     const updated = Object.assign({}, selectedSong, { parts: draftParts, marks: draftMarks, points: draftPoints, rubies: draftRubies, authorId: selectedSong.authorId || user.id, authorName: selectedSong.authorName || user.name, updatedAt: new Date().toISOString() });
@@ -1178,9 +1208,11 @@ function LyricsArchive() {
       ]),
     ]);
     const autoRubyErrRow = autoRubyError && E("div", { key: "autoerr", style: { fontFamily: FONT_M, fontSize: 11, color: C.wax, marginBottom: 8 } }, `⚠ ${autoRubyError}`);
+    const autoRubyStatusRow = autoRubyBusy && autoRubyStatus && E("div", { key: "autostatus", style: { fontFamily: FONT_M, fontSize: 11, color: C.brass, marginBottom: 8 } }, `⏳ ${autoRubyStatus}`);
     const leftColumn = E("div", { key: "left", style: { flex: 1, minWidth: 0, maxWidth: isWideScreen ? 768 : "none" } }, [
       header,
       autoRubyErrRow,
+      autoRubyStatusRow,
       !isWideScreen && paintPanel,
       !isWideScreen && stampPanel,
       E("p", { key: "desc", style: { fontFamily: FONT_B, fontSize: 12, color: C.paperTextDim, marginBottom: 12, lineHeight: 1.7 } }, "①②を使わずに歌詞をドラッグして選択した場合は、選択箇所の近くにマーカー用のツールバーが出ます。"),
@@ -1203,6 +1235,7 @@ function LyricsArchive() {
       mainContent,
       selRange && selRect && !paintPart && !stampType && E("div", {
         key: "floatbar",
+        ref: toolbarRef,
         onMouseDown: (ev) => { if (ev.target.tagName !== "INPUT" && ev.target.tagName !== "TEXTAREA") ev.preventDefault(); },
         style: {
           position: "fixed", zIndex: 60, width: "min(300px, 92vw)",
