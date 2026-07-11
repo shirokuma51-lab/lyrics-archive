@@ -411,7 +411,7 @@ function Legend({ parts, marks, points, partCatalog, markCatalog, pointCatalog }
 }
 
 function ModalShell(children, width) {
-  return E("div", { style: { position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 16px", background: "rgba(0,0,0,0.55)" } },
+  return E("div", { style: { position: "fixed", inset: 0, zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 16px", background: "rgba(0,0,0,0.55)" } },
     E("div", { style: { background: C.paper, borderRadius: 6, padding: "24px 26px", width: width || 320, maxHeight: "82vh", overflowY: "auto", boxShadow: "0 12px 32px rgba(0,0,0,0.5)" } }, children)
   );
 }
@@ -431,8 +431,8 @@ function LegacyPinGate({ onSubmit, onCancel, error, busy }) {
   ]);
 }
 
-function CatalogModal({ title, items, hasSymbol, onClose, onAdd, onUpdate, onDelete }) {
-  return E("div", { style: { position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 16px", background: "rgba(0,0,0,0.55)" } },
+function CatalogModal({ title, items, hasSymbol, onClose, onAdd, onUpdate, onDelete, onReset }) {
+  return E("div", { style: { position: "fixed", inset: 0, zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 16px", background: "rgba(0,0,0,0.55)" } },
     E("div", { style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "20px 22px", width: 420, maxHeight: "80vh", overflowY: "auto" } }, [
       E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 } },
         E("span", { style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, title),
@@ -445,7 +445,10 @@ function CatalogModal({ title, items, hasSymbol, onClose, onAdd, onUpdate, onDel
           E("button", { key: "d", onClick: () => onDelete(it.id), title: "削除", style: { background: "none", border: "none", cursor: "pointer", color: C.waxDim } }, "✕"),
         ])
       )),
-      E("button", { key: "add", onClick: onAdd, style: { display: "flex", alignItems: "center", gap: 6, marginTop: 12, background: "transparent", border: `1px dashed ${C.brassDim}`, borderRadius: 4, padding: "7px 10px", color: C.brass, fontSize: 12, cursor: "pointer", fontFamily: FONT_M } }, "＋ 追加する"),
+      E("div", { key: "row2", style: { display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" } }, [
+        E("button", { key: "add", onClick: onAdd, style: { display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px dashed ${C.brassDim}`, borderRadius: 4, padding: "7px 10px", color: C.brass, fontSize: 12, cursor: "pointer", fontFamily: FONT_M } }, "＋ 追加する"),
+        onReset && E("button", { key: "reset", onClick: onReset, style: { display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px dashed ${C.inkBorder}`, borderRadius: 4, padding: "7px 10px", color: C.paperTextDim, fontSize: 12, cursor: "pointer", fontFamily: FONT_M } }, "⟲ 初期値に戻す"),
+      ]),
       E("div", { key: "note", style: { fontSize: 11, color: C.paperTextDim, marginTop: 12, fontFamily: FONT_B, lineHeight: 1.6 } }, "ここでの変更は共有データとして全員に反映されます。色や記号、ラベルはあとから自由に変更できます。"),
     ])
   );
@@ -828,6 +831,13 @@ function LyricsArchive() {
     setList(next);
     saveCatalog(key, next);
   }
+  function resetCatalogToDefault(kind) {
+    const defaults = kind === "part" ? DEFAULT_PART_CATALOG : kind === "mark" ? DEFAULT_MARK_CATALOG : DEFAULT_POINT_CATALOG;
+    if (!confirm("この一覧を初期値に戻しますか?(自分で追加・編集した項目は失われます)")) return;
+    const [, setList, key] = catalogStateFor(kind);
+    setList(defaults);
+    saveCatalog(key, defaults);
+  }
 
   const isFormMode = mode === "edit" || mode === "new";
   const editable = canEditSong(selectedSong);
@@ -980,9 +990,9 @@ function LyricsArchive() {
       E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 } }, [
         E("span", { key: "t", style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, "✨ パート・記号を編集"),
         E("div", { key: "btns", style: { display: "flex", gap: 8, flexWrap: "wrap" } }, [
-          E("button", { key: "p", onClick: () => setCatalogModal("part"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ パート色を管理"),
-          E("button", { key: "m", onClick: () => setCatalogModal("mark"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ マーカーを管理"),
-          E("button", { key: "pt", onClick: () => setCatalogModal("point"), style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ 記号を管理"),
+          E("button", { key: "p", onClick: () => { closeToolbar(); setCatalogModal("part"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ パート色を管理"),
+          E("button", { key: "m", onClick: () => { closeToolbar(); setCatalogModal("mark"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ マーカーを管理"),
+          E("button", { key: "pt", onClick: () => { closeToolbar(); setCatalogModal("point"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ 記号を管理"),
         ]),
       ]),
       E("div", { key: "paint", style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "10px 12px", marginBottom: 14 } }, [
@@ -1051,9 +1061,9 @@ function LyricsArchive() {
   return E("div", { style: { width: "100%", height: "100vh", display: "flex", overflow: "hidden", background: C.ink } }, [
     sidebar, mainPanel,
     legacyGate && E(LegacyPinGate, { key: "legacy", onSubmit: submitLegacyGate, onCancel: () => setLegacyGate(null), error: legacyGateError, busy: legacyGateBusy }),
-    catalogModal === "part" && E(CatalogModal, { key: "catp", title: "パート色を管理", items: partCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("part"), onUpdate: (id, patch) => updateCatalogItem("part", id, patch), onDelete: (id) => deleteCatalogItem("part", id) }),
-    catalogModal === "mark" && E(CatalogModal, { key: "catm", title: "マーカー(ハイライト)を管理", items: markCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("mark"), onUpdate: (id, patch) => updateCatalogItem("mark", id, patch), onDelete: (id) => deleteCatalogItem("mark", id) }),
-    catalogModal === "point" && E(CatalogModal, { key: "catpt", title: "記号(ブレス・ロングトーン等)を管理", items: pointCatalog, hasSymbol: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("point"), onUpdate: (id, patch) => updateCatalogItem("point", id, patch), onDelete: (id) => deleteCatalogItem("point", id) }),
+    catalogModal === "part" && E(CatalogModal, { key: "catp", title: "パート色を管理", items: partCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("part"), onUpdate: (id, patch) => updateCatalogItem("part", id, patch), onDelete: (id) => deleteCatalogItem("part", id), onReset: () => resetCatalogToDefault("part") }),
+    catalogModal === "mark" && E(CatalogModal, { key: "catm", title: "マーカー(ハイライト)を管理", items: markCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("mark"), onUpdate: (id, patch) => updateCatalogItem("mark", id, patch), onDelete: (id) => deleteCatalogItem("mark", id), onReset: () => resetCatalogToDefault("mark") }),
+    catalogModal === "point" && E(CatalogModal, { key: "catpt", title: "記号(ブレス・ロングトーン等)を管理", items: pointCatalog, hasSymbol: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("point"), onUpdate: (id, patch) => updateCatalogItem("point", id, patch), onDelete: (id) => deleteCatalogItem("point", id), onReset: () => resetCatalogToDefault("point") }),
   ]);
 }
 
