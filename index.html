@@ -289,8 +289,9 @@ function buildSegments(text, parts, marks, pointMarks, rubies) {
   return segments;
 }
 
-// ---------- automatic furigana (kuromoji.js を遅延読み込みして自動でルビ候補を生成する) ----------
-let kuromojiTokenizerPromise = null;
+// ---------- automatic furigana (kuromoji.js をWeb Worker上で動かし、自動でルビ候補を生成する) ----------
+// 辞書の構築・形態素解析はCPU負荷が高く、メインスレッド(画面描画)で行うとページが「応答なし」になることがあるため、
+// 専用のWeb Workerを作ってバックグラウンドスレッドで実行する。
 function withTimeout(promise, ms, message) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message || "タイムアウトしました")), ms);
@@ -300,28 +301,69 @@ function withTimeout(promise, ms, message) {
     );
   });
 }
-function loadScriptOnce(src) {
+const FURIGANA_WORKER_SRC = `
+self.onmessage = function (e) {
+  var msg = e.data || {};
+  if (msg.type === "init") {
+    try {
+      importScripts("https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js");
+      self.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build(function (err, tokenizer) {
+        if (err) { self.postMessage({ type: "init-error", message: String((err && err.message) || err) }); return; }
+        self._tokenizer = tokenizer;
+        self.postMessage({ type: "ready" });
+      });
+    } catch (err) {
+      self.postMessage({ type: "init-error", message: String((err && err.message) || err) });
+    }
+  } else if (msg.type === "tokenize") {
+    try {
+      if (!self._tokenizer) { self.postMessage({ type: "tokenize-error", message: "tokenizer not ready" }); return; }
+      var tokens = self._tokenizer.tokenize(msg.text);
+      self.postMessage({ type: "tokenize-result", tokens: tokens });
+    } catch (err) {
+      self.postMessage({ type: "tokenize-error", message: String((err && err.message) || err) });
+    }
+  }
+};
+`;
+let furiganaWorker = null;
+let furiganaWorkerReadyPromise = null;
+// 初回呼び出し時だけWorkerを立ち上げ、CDNからkuromoji本体+辞書(数MB)をWorker内で取得・構築する。以後はページ内で使い回す。
+function getFuriganaWorker() {
+  if (furiganaWorkerReadyPromise) return furiganaWorkerReadyPromise;
+  if (typeof Worker === "undefined") return Promise.reject(new Error("このブラウザはWeb Workerに対応していません"));
+  const blobUrl = URL.createObjectURL(new Blob([FURIGANA_WORKER_SRC], { type: "application/javascript" }));
+  const worker = new Worker(blobUrl);
+  furiganaWorker = worker;
+  furiganaWorkerReadyPromise = new Promise((resolve, reject) => {
+    function onMessage(e) {
+      const data = e.data || {};
+      if (data.type === "ready") { worker.removeEventListener("message", onMessage); resolve(worker); }
+      else if (data.type === "init-error") { worker.removeEventListener("message", onMessage); reject(new Error(data.message)); }
+    }
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", (e) => reject(new Error(e.message || "Workerでエラーが発生しました")));
+    worker.postMessage({ type: "init" });
+  });
+  return furiganaWorkerReadyPromise;
+}
+// 失敗時に呼び、次回また最初からWorkerを立ち上げ直せるようにする。
+function resetFuriganaWorker() {
+  if (furiganaWorker) { try { furiganaWorker.terminate(); } catch (e) {} }
+  furiganaWorker = null;
+  furiganaWorkerReadyPromise = null;
+}
+function tokenizeWithWorker(worker, text) {
   return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-    const el = document.createElement("script");
-    el.src = src; el.onload = () => resolve(); el.onerror = () => reject(new Error("スクリプトの読み込みに失敗しました: " + src));
-    document.head.appendChild(el);
+    function onMessage(e) {
+      const data = e.data || {};
+      if (data.type === "tokenize-result") { worker.removeEventListener("message", onMessage); resolve(data.tokens); }
+      else if (data.type === "tokenize-error") { worker.removeEventListener("message", onMessage); reject(new Error(data.message)); }
+    }
+    worker.addEventListener("message", onMessage);
+    worker.postMessage({ type: "tokenize", text });
   });
 }
-// 初回呼び出し時だけCDNからkuromoji本体+辞書(数MB)を取得する。以後はページ内で使い回す。
-// モバイル回線などで通信が詰まって固まったように見えるのを防ぐため、呼び出し側(runAutoRuby)でタイムアウトを掛ける。
-// タイムアウト/失敗時は resetKuromojiTokenizer() で状態をクリアし、次回また最初から取得できるようにする。
-function getKuromojiTokenizer() {
-  if (kuromojiTokenizerPromise) return kuromojiTokenizerPromise;
-  kuromojiTokenizerPromise = loadScriptOnce("https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js")
-    .then(() => new Promise((resolve, reject) => {
-      window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, tokenizer) => {
-        if (err) reject(err); else resolve(tokenizer);
-      });
-    }));
-  return kuromojiTokenizerPromise;
-}
-function resetKuromojiTokenizer() { kuromojiTokenizerPromise = null; }
 function kataToHira(str) { return str.replace(/[\u30A1-\u30F6]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0x60)); }
 function hasKanji(str) { return /[\u4E00-\u9FFF々〆〤]/.test(str); }
 function isHiraganaChar(ch) { return ch >= "\u3040" && ch <= "\u309F"; }
@@ -342,13 +384,12 @@ function kanjiCoreOfToken(surface, readingHiragana) {
   return { offsetStart: coreStart, offsetEnd: coreEnd, reading: readingHiragana.slice(startTrim, readingHiragana.length - endTrim) };
 }
 function overlapsAnyRange(start, end, ranges) { return (ranges || []).some((r) => start < r.end && end > r.start); }
-// 歌詞全文をトークナイズし、漢字を含む単語ごとにルビ候補を作る。existingRubiesと範囲が重なる候補は除外する(既存の手動ルビを上書きしない)。
-function buildAutoRubies(text, tokenizer, existingRubies) {
-  const tokens = tokenizer.tokenize(text);
+// Worker側で得たtokens配列から、漢字を含む単語ごとにルビ候補を作る。existingRubiesと範囲が重なる候補は除外する(既存の手動ルビを上書きしない)。
+function buildAutoRubies(text, tokens, existingRubies) {
   const occupied = (existingRubies || []).slice();
   const results = [];
   let cursor = 0;
-  tokens.forEach((tok) => {
+  (tokens || []).forEach((tok) => {
     const surface = tok.surface_form;
     if (!surface) return;
     const start = text.indexOf(surface, cursor);
@@ -913,21 +954,25 @@ function LyricsArchive() {
     setRubyText("");
   }
   // 歌詞全文を解析し、まだルビが振られていない漢字箇所にだけ自動でルビ候補を追加する(既存ルビは上書きしない)。
-  // モバイル回線などで辞書のダウンロードが詰まった場合に「解析中...」のまま固まって見えないよう、タイムアウトと状態表示を行う。
+  // 辞書構築・形態素解析はWeb Worker(別スレッド)で行うため、画面が固まることはない。
+  // それでも通信/処理が詰まった場合に備えてタイムアウトと状態表示を行う。
   async function runAutoRuby() {
     if (!selectedSong) return;
     if (!confirm("歌詞全体を解析し、まだルビが振られていない漢字に読みを自動で振ります。\n既にルビがある範囲はそのまま残ります。よろしいですか?\n(初回は辞書データ(数MB)の読み込みが必要です。Wi-Fi環境を推奨します)")) return;
     setAutoRubyBusy(true); setAutoRubyError(""); setAutoRubyStatus("辞書を読み込み中...(初回は数十秒かかることがあります)");
     try {
-      const tokenizer = await withTimeout(getKuromojiTokenizer(), 60000, "辞書の読み込みがタイムアウトしました");
+      const worker = await withTimeout(getFuriganaWorker(), 60000, "辞書の読み込みがタイムアウトしました");
       setAutoRubyStatus("歌詞を解析中...");
-      const suggestions = buildAutoRubies(selectedSong.lyrics, tokenizer, draftRubies);
+      const tokens = await withTimeout(tokenizeWithWorker(worker, selectedSong.lyrics), 30000, "解析がタイムアウトしました");
+      const suggestions = buildAutoRubies(selectedSong.lyrics, tokens, draftRubies);
       setDraftRubies((prev) => prev.concat(suggestions));
       if (suggestions.length === 0) setAutoRubyError("新たに追加できるルビは見つかりませんでした。");
     } catch (e) {
-      resetKuromojiTokenizer(); // 次回また最初から取得し直せるようにする
-      if (e && e.message === "辞書の読み込みがタイムアウトしました") {
-        setAutoRubyError("辞書の読み込みに時間がかかりすぎたため中断しました。通信環境の良い場所(Wi-Fiなど)でもう一度お試しください。");
+      resetFuriganaWorker(); // 次回また最初からWorkerを立ち上げ直せるようにする
+      if (e && /タイムアウトしました$/.test(e.message || "")) {
+        setAutoRubyError("処理に時間がかかりすぎたため中断しました。通信環境の良い場所(Wi-Fiなど)でもう一度お試しください。");
+      } else if (e && /Web Worker/.test(e.message || "")) {
+        setAutoRubyError("このブラウザは自動ルビ機能に対応していません。お手数ですが手動でルビを入力してください。");
       } else {
         setAutoRubyError("自動ルビの生成に失敗しました。もう一度お試しください。");
       }
