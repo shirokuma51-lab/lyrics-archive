@@ -531,6 +531,7 @@ function LyricsArchive() {
   const [previewEntry, setPreviewEntry] = useState(null);
   const [err, setErr] = useState("");
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [isWideScreen, setIsWideScreen] = useState(window.innerWidth >= 1100);
   const [mobileListOpen, setMobileListOpen] = useState(true);
 
   const [partCatalog, setPartCatalog] = useState(DEFAULT_PART_CATALOG);
@@ -559,7 +560,7 @@ function LyricsArchive() {
   const [migrateMsg, setMigrateMsg] = useState("");
 
   useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 768);
+    const onResize = () => { setIsMobile(window.innerWidth < 768); setIsWideScreen(window.innerWidth >= 1100); };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
@@ -1024,43 +1025,46 @@ function LyricsArchive() {
   } else if (mode === "annotate" && selectedSong) {
     const showAbove = !!(selRect && selRect.top > 200);
     const toolbarLeft = selRect ? Math.min(Math.max(selRect.left, 8), Math.max(8, window.innerWidth - 8 - 300)) : 0;
-    mainContent = E("div", { style: { maxWidth: 768, margin: "0 auto", padding: "32px 24px" } }, [
-      E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 } }, [
-        E("span", { key: "t", style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, "✨ パート・記号を編集"),
-        E("div", { key: "btns", style: { display: "flex", gap: 8, flexWrap: "wrap" } }, [
-          E("button", { key: "p", onClick: () => { closeToolbar(); setCatalogModal("part"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ パート色を管理"),
-          E("button", { key: "m", onClick: () => { closeToolbar(); setCatalogModal("mark"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ マーカーを管理"),
-          E("button", { key: "pt", onClick: () => { closeToolbar(); setCatalogModal("point"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ 記号を管理"),
-        ]),
+    const paintPanel = E("div", { key: "paint", style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "10px 12px", marginBottom: 10 } }, [
+      E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 6, fontFamily: FONT_M } }, "① パートを選んでから歌詞をなぞると、下線が引かれます"),
+      E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, partCatalog.map((p) => {
+        const active = paintPart === p.id;
+        return E("button", {
+          key: p.id, onClick: () => armPaintPart(p.id),
+          style: { display: "flex", alignItems: "center", gap: 6, background: active ? `${p.color}33` : C.ink, border: `2px solid ${p.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" },
+        }, E("span", { style: { width: 14, height: 3, borderRadius: 1, background: p.color, display: "inline-block" } }), E("span", { style: { fontSize: 11, color: active ? p.color : C.paperText, fontFamily: FONT_B, fontWeight: active ? 700 : 400 } }, p.label));
+      })),
+      paintPart && E("div", { key: "hint", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, fontFamily: FONT_M, fontSize: 11, color: C.brass, flexWrap: "wrap", gap: 6 } }, [
+        E("span", { key: "t" }, "🖌 塗りモード中(Escで解除)"),
+        E("button", { key: "off", onClick: () => setPaintPart(null), style: { fontSize: 10, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 3, padding: "2px 7px", cursor: "pointer" } }, "解除"),
       ]),
-      E("div", { key: "paint", style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "10px 12px", marginBottom: 10 } }, [
-        E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 6, fontFamily: FONT_M } }, "① パートを選んでから歌詞をなぞると、下線が引かれます"),
-        E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, partCatalog.map((p) => {
-          const active = paintPart === p.id;
-          return E("button", {
-            key: p.id, onClick: () => armPaintPart(p.id),
-            style: { display: "flex", alignItems: "center", gap: 6, background: active ? `${p.color}33` : C.ink, border: `2px solid ${p.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" },
-          }, E("span", { style: { width: 14, height: 3, borderRadius: 1, background: p.color, display: "inline-block" } }), E("span", { style: { fontSize: 11, color: active ? p.color : C.paperText, fontFamily: FONT_B, fontWeight: active ? 700 : 400 } }, p.label));
-        })),
-        paintPart && E("div", { key: "hint", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, fontFamily: FONT_M, fontSize: 11, color: C.brass } }, [
-          E("span", { key: "t" }, "🖌 塗りモード中 - 歌詞をドラッグしてください(Escで解除)"),
-          E("button", { key: "off", onClick: () => setPaintPart(null), style: { fontSize: 10, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 3, padding: "2px 7px", cursor: "pointer" } }, "解除"),
-        ]),
+    ]);
+    const stampPanel = E("div", { key: "stamp", style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "10px 12px", marginBottom: 14 } }, [
+      E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 6, fontFamily: FONT_M } }, "② 記号を選んでから歌詞をポンポンとクリック/タップすると配置(スタンプモード)"),
+      E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, pointCatalog.map((pt) => {
+        const active = stampType === pt.id;
+        return E("button", {
+          key: pt.id, onClick: () => armStampType(pt.id),
+          style: { display: "flex", alignItems: "center", gap: 6, background: active ? `${pt.color}33` : C.ink, border: `2px solid ${pt.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" },
+        }, E("span", { style: { color: pt.color, fontWeight: 700, fontSize: 12 } }, pt.symbol), E("span", { style: { fontSize: 11, color: active ? pt.color : C.paperText, fontFamily: FONT_B, fontWeight: active ? 700 : 400 } }, pt.label));
+      })),
+      stampType && E("div", { key: "hint", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, fontFamily: FONT_M, fontSize: 11, color: C.brass, flexWrap: "wrap", gap: 6 } }, [
+        E("span", { key: "t" }, "🖱 スタンプモード中(Esc解除・同じ場所を再タップで削除)"),
+        E("button", { key: "off", onClick: () => setStampType(null), style: { fontSize: 10, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 3, padding: "2px 7px", cursor: "pointer" } }, "解除"),
       ]),
-      E("div", { key: "stamp", style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "10px 12px", marginBottom: 14 } }, [
-        E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 6, fontFamily: FONT_M } }, "② 記号を選んでから歌詞をポンポンとクリック/タップすると、その位置に配置されます(スタンプモード)"),
-        E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, pointCatalog.map((pt) => {
-          const active = stampType === pt.id;
-          return E("button", {
-            key: pt.id, onClick: () => armStampType(pt.id),
-            style: { display: "flex", alignItems: "center", gap: 6, background: active ? `${pt.color}33` : C.ink, border: `2px solid ${pt.color}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" },
-          }, E("span", { style: { color: pt.color, fontWeight: 700, fontSize: 12 } }, pt.symbol), E("span", { style: { fontSize: 11, color: active ? pt.color : C.paperText, fontFamily: FONT_B, fontWeight: active ? 700 : 400 } }, pt.label));
-        })),
-        stampType && E("div", { key: "hint", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, fontFamily: FONT_M, fontSize: 11, color: C.brass } }, [
-          E("span", { key: "t" }, "🖱 スタンプモード中 - 歌詞をクリック/タップしてください(Escで解除・同じ場所をもう一度押すと削除)"),
-          E("button", { key: "off", onClick: () => setStampType(null), style: { fontSize: 10, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 3, padding: "2px 7px", cursor: "pointer" } }, "解除"),
-        ]),
+    ]);
+    const header = E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 } }, [
+      E("span", { key: "t", style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, "✨ パート・記号を編集"),
+      E("div", { key: "btns", style: { display: "flex", gap: 8, flexWrap: "wrap" } }, [
+        E("button", { key: "p", onClick: () => { closeToolbar(); setCatalogModal("part"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ パート色を管理"),
+        E("button", { key: "m", onClick: () => { closeToolbar(); setCatalogModal("mark"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ マーカーを管理"),
+        E("button", { key: "pt", onClick: () => { closeToolbar(); setCatalogModal("point"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ 記号を管理"),
       ]),
+    ]);
+    const leftColumn = E("div", { key: "left", style: { flex: 1, minWidth: 0, maxWidth: isWideScreen ? 768 : "none" } }, [
+      header,
+      !isWideScreen && paintPanel,
+      !isWideScreen && stampPanel,
       E("p", { key: "desc", style: { fontFamily: FONT_B, fontSize: 12, color: C.paperTextDim, marginBottom: 12, lineHeight: 1.7 } }, "①②を使わずに歌詞をドラッグして選択した場合は、選択箇所の近くにマーカー用のツールバーが出ます。"),
       E("div", { key: "card", style: { background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 2, padding: "24px 28px", boxShadow: "0 8px 24px rgba(0,0,0,0.35)" } },
         E(LyricsRenderer, { text: selectedSong.lyrics, parts: draftParts, marks: draftMarks, points: draftPoints, partCatalog, markCatalog, pointCatalog, interactive: true, containerRef: annotateRef, onMouseUp: handlePointerCommit, onTouchEnd: handlePointerCommit })
@@ -1070,6 +1074,15 @@ function LyricsArchive() {
         E("button", { key: "save", onClick: saveAnnotations, disabled: saving, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 5, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 } }, saving ? "保存中..." : "💾 保存する"),
         E("button", { key: "cancel", onClick: () => setMode("view"), style: { background: "transparent", color: C.paperTextDim, border: `1px solid ${C.paperLine}`, borderRadius: 5, padding: "9px 16px", fontSize: 13, cursor: "pointer" } }, "✕ キャンセル"),
       ]),
+    ]);
+    // isWideScreen(横幅に余裕がある画面)のときだけ、①②を右カラムにposition:stickyで固定表示する。
+    // sticky は「スクロールする祖先要素(mainPanelのcontentDiv)」を基準に動くので、fixedのような座標計算が不要で崩れにくい。
+    const rightColumn = isWideScreen && E("div", { key: "right", style: { width: 250, flexShrink: 0, position: "sticky", top: 16, alignSelf: "flex-start" } }, [paintPanel, stampPanel]);
+    mainContent = E("div", { style: { maxWidth: isWideScreen ? 1080 : 768, margin: "0 auto", padding: "32px 24px" } },
+      E("div", { style: { display: "flex", gap: 24, alignItems: "flex-start" } }, [leftColumn, rightColumn])
+    );
+    mainContent = E("div", { style: { position: "relative" } }, [
+      mainContent,
       selRange && selRect && !paintPart && !stampType && E("div", {
         key: "floatbar",
         onMouseDown: (ev) => ev.preventDefault(),
