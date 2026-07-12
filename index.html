@@ -269,6 +269,31 @@ function getClickOffset(container, clientX, clientY) {
   if (!container.contains(node) || isInSkip(node, container)) return null;
   return nodeOffsetToTextOffset(container, node, offset);
 }
+// クリック/タップした画面座標が、ふりがな(ルビ)の文字の上だった場合に、そのルビ内の絶対オフセットを割り出す
+// (「本」の読み「ほん」の「ほ」と「ん」の間、のようにルビ自体の文字間へ記号を置くためのスタンプモード用)。
+// data-ruby-id / data-ruby-base-offset は LyricsRenderer 側でふりがな断片ごとに付与している。
+function getRubyClickTarget(container, clientX, clientY) {
+  let node, offset;
+  if (document.caretPositionFromPoint) {
+    const pos = document.caretPositionFromPoint(clientX, clientY);
+    if (!pos) return null;
+    node = pos.offsetNode; offset = pos.offset;
+  } else if (document.caretRangeFromPoint) {
+    const range = document.caretRangeFromPoint(clientX, clientY);
+    if (!range) return null;
+    node = range.startContainer; offset = range.startOffset;
+  } else return null;
+  if (!container.contains(node)) return null;
+  let el = node.nodeType === 3 ? node.parentElement : node;
+  while (el && el !== container) {
+    if (el.dataset && el.dataset.rubyId != null) {
+      const base = parseInt(el.dataset.rubyBaseOffset, 10) || 0;
+      return { rubyId: el.dataset.rubyId, rubyOffset: base + offset };
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
 function buildSegments(text, parts, marks, pointMarks, rubies) {
   const breakpoints = new Set([0, text.length]);
   (parts || []).forEach((p) => { breakpoints.add(p.start); breakpoints.add(p.end); });
@@ -465,9 +490,16 @@ function PinInput(value, onChange) {
 
 function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markCatalog, pointCatalog, interactive, containerRef, onMouseUp, onTouchEnd }) {
   const segments = useMemo(() => buildSegments(text || "", parts, marks, points, rubies), [text, parts, marks, points, rubies]);
+  // ★ルビの外(通常の文字間)に置かれた記号のみ対象。ルビ内部(rubyIdあり)の記号は別枠(pointsByRubyOffset)で扱う。
   const pointsByPos = useMemo(() => {
     const map = {};
-    (points || []).forEach((pt) => { (map[pt.position] = map[pt.position] || []).push(pt); });
+    (points || []).forEach((pt) => { if (pt.rubyId) return; (map[pt.position] = map[pt.position] || []).push(pt); });
+    return map;
+  }, [points]);
+  // ★ふりがな(ルビ)自体の文字と文字の間に置かれた記号。key = "rubyId:そのルビ文字列内の絶対オフセット"
+  const pointsByRubyOffset = useMemo(() => {
+    const map = {};
+    (points || []).forEach((pt) => { if (!pt.rubyId) return; const k = pt.rubyId + ":" + pt.rubyOffset; (map[k] = map[k] || []).push(pt); });
     return map;
   }, [points]);
   function renderPointsAt(pos) {
@@ -479,6 +511,18 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       return E("span", {
         key: pt.id, "data-annot-skip": "true", title: def.label,
         style: { display: "inline-block", color: def.color, fontWeight: 700, fontSize: 12, margin: "0 2px", verticalAlign: "middle" },
+      }, def.symbol);
+    });
+  }
+  function renderRubyPointsAt(rubyId, offset) {
+    const list = pointsByRubyOffset[rubyId + ":" + offset];
+    if (!list || list.length === 0) return null;
+    return list.map((pt) => {
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (!def) return null;
+      return E("span", {
+        key: pt.id, "data-annot-skip": "true", title: def.label,
+        style: { display: "inline-block", color: def.color, fontWeight: 700, fontSize: 9, margin: "0 1px", verticalAlign: "middle" },
       }, def.symbol);
     });
   }
@@ -499,6 +543,10 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
   // 「ふりがなの行」の方に差し込んで表示する(例: 本[記号]棚 ではなく ほん[記号]だな のように上段に出す)。
   // ルビの文字列には1文字ごとの対応が保存されていないため、各セグメントの本文の文字数比率で
   // ふりがな文字列を按分して振り分ける(複合語の読みが不均等な場合は多少の誤差が出ることがある)。
+  // ★さらに、ふりがな自体の文字の間(例:「ほん」の「ほ」と「ん」の間)にも記号を置けるようにしている。
+  // その場合は本文側は分割せず(1文字のまま)、ふりがな側だけを内部で区切って記号を挟み込む。
+  // 各ふりがな断片には data-ruby-id / data-ruby-base-offset を付与し、クリック位置→ルビ内オフセットの
+  // 逆算(getRubyClickTarget)に使えるようにしている。
   let i = 0;
   while (i < segments.length) {
     const seg = segments[i];
@@ -513,15 +561,25 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       group.forEach((gseg) => { runningBase += gseg.text.length; boundaries.push(Math.round((runningBase / totalBaseLen) * rubyStr.length)); });
       group.forEach((gseg, gi) => {
         const { segStyle, title } = segStyleAndTitleOf(gseg);
-        const subReading = rubyStr.slice(boundaries[gi], boundaries[gi + 1]);
+        const segStart = boundaries[gi], segEnd = boundaries[gi + 1];
+        const innerOffsets = Array.from(new Set(
+          (points || []).filter((pt) => pt.rubyId === seg.ruby.id && pt.rubyOffset > segStart && pt.rubyOffset < segEnd).map((pt) => pt.rubyOffset)
+        )).sort((a, b) => a - b);
+        const rtChildren = [];
+        let cursor = segStart;
+        innerOffsets.forEach((o, oi) => {
+          rtChildren.push(E("span", { key: "t" + oi, "data-ruby-id": seg.ruby.id, "data-ruby-base-offset": String(cursor) }, rubyStr.slice(cursor, o)));
+          const syms = renderRubyPointsAt(seg.ruby.id, o);
+          if (syms) rtChildren.push(E(React.Fragment, { key: "s" + oi }, syms));
+          cursor = o;
+        });
+        rtChildren.push(E("span", { key: "tlast", "data-ruby-id": seg.ruby.id, "data-ruby-base-offset": String(cursor) }, rubyStr.slice(cursor, segEnd)));
         const isLastInGroup = gi === group.length - 1;
-        const midSymbols = !isLastInGroup ? renderPointsAt(gseg.end) : null; // ルビの内側の区切りにある記号→ふりがな行へ
+        const midSymbols = !isLastInGroup ? renderPointsAt(gseg.end) : null; // ルビの内側(文字と文字の区切り)にある記号→ふりがな行へ
+        rtChildren.push(midSymbols ? E("span", { key: "sym", "data-annot-skip": "true", style: { margin: "0 1px" } }, midSymbols) : null);
         nodes.push(E("ruby", { key: `seg-${i}-${gi}` }, [
           E("span", { key: "base", style: segStyle, title }, gseg.text),
-          E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, fontWeight: 500, color: "#8A6D3C", userSelect: "none" } }, [
-            E("span", { key: "txt" }, subReading),
-            midSymbols ? E("span", { key: "sym", "data-annot-skip": "true", style: { margin: "0 1px" } }, midSymbols) : null,
-          ]),
+          E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, fontWeight: 500, color: "#8A6D3C", userSelect: "none" } }, rtChildren),
         ]));
       });
       const lastEnd = group[group.length - 1].end;
@@ -952,9 +1010,21 @@ function LyricsArchive() {
   function placeStamp(position, typeId) {
     pushUndoSnapshot();
     setDraftPoints((prev) => {
-      const exists = prev.some((pt) => pt.position === position && pt.typeId === typeId);
-      if (exists) return prev.filter((pt) => !(pt.position === position && pt.typeId === typeId));
+      const exists = prev.some((pt) => !pt.rubyId && pt.position === position && pt.typeId === typeId);
+      if (exists) return prev.filter((pt) => !(!pt.rubyId && pt.position === position && pt.typeId === typeId));
       return prev.concat([{ id: newId(), position, typeId }]);
+    });
+  }
+  // ふりがな(ルビ)自体の文字の間に記号を置く。rubyOffsetはルビ文字列内の絶対オフセット。
+  // positionには選択範囲での絞り込み用に、対象ルビの開始位置(本文側)をアンカーとして入れておく。
+  function placeRubyStamp(rubyId, rubyOffset, typeId) {
+    pushUndoSnapshot();
+    const ruby = draftRubies.find((r) => r.id === rubyId);
+    const anchorPos = ruby ? ruby.start : 0;
+    setDraftPoints((prev) => {
+      const exists = prev.some((pt) => pt.rubyId === rubyId && pt.rubyOffset === rubyOffset && pt.typeId === typeId);
+      if (exists) return prev.filter((pt) => !(pt.rubyId === rubyId && pt.rubyOffset === rubyOffset && pt.typeId === typeId));
+      return prev.concat([{ id: newId(), position: anchorPos, typeId, rubyId, rubyOffset }]);
     });
   }
   // パート塗りモード/記号スタンプモードは、ドラッグやタップを離した(マウスアップ/タッチエンド)瞬間だけ確定させる。
@@ -974,6 +1044,8 @@ function LyricsArchive() {
         const sel = window.getSelection();
         if (sel && !sel.isCollapsed) return; // ドラッグで範囲選択された場合はスタンプを置かない
         if (clientX == null || clientY == null) return;
+        const rubyTarget = getRubyClickTarget(annotateRef.current, clientX, clientY);
+        if (rubyTarget) { placeRubyStamp(rubyTarget.rubyId, rubyTarget.rubyOffset, stampType); return; }
         const pos = getClickOffset(annotateRef.current, clientX, clientY);
         if (pos != null) placeStamp(pos, stampType);
       }, 0);
@@ -1312,7 +1384,7 @@ function LyricsArchive() {
       ]),
     ]);
     const stampPanel = E("div", { key: "stamp", style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "10px 12px", marginBottom: 14 } }, [
-      E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 6, fontFamily: FONT_M } }, "② 記号を選んでから歌詞をポンポンとクリック/タップすると配置(スタンプモード)"),
+      E("div", { key: "l", style: { fontSize: 10, color: "#8A8060", marginBottom: 6, fontFamily: FONT_M } }, "② 記号を選んでから歌詞をポンポンとクリック/タップすると配置(スタンプモード)。ふりがなの文字と文字の間をタップすると、ふりがな側に記号を挟めます"),
       E("div", { key: "row", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, pointCatalog.map((pt) => {
         const active = stampType === pt.id;
         return E("button", {
