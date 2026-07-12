@@ -151,6 +151,16 @@ async function setUserReaction(songId, userId, types) {
 async function updateReactionTotal(songId, total) {
   try { await db.collection("songs").doc(songId).update({ reactionTotal: total }); } catch (e) {}
 }
+// ★Phase4: users/{uid} にニックネームを保存。表示優先順位はニックネーム→Google表示名。
+async function getUserProfile(uid) {
+  try {
+    const doc = await db.collection("users").doc(uid).get();
+    return doc.exists ? doc.data() : null;
+  } catch (e) { return null; }
+}
+async function setUserProfile(uid, data) {
+  await db.collection("users").doc(uid).set(data, { merge: true });
+}
 
 // ---------- legacy window.storage readers (アーティファクト専用ストレージからの読み取り専用。移行専用) ----------
 async function getLegacyIndex() {
@@ -783,6 +793,12 @@ function LyricsArchive() {
   const [migrating, setMigrating] = useState(false);
   const [migrateMsg, setMigrateMsg] = useState("");
 
+  // ★Phase4: マイページ - ニックネーム設定
+  const [nickname, setNickname] = useState(""); // users/{uid}.nickname のキャッシュ("" = 未設定)
+  const [nicknameDraft, setNicknameDraft] = useState("");
+  const [nicknameSaving, setNicknameSaving] = useState(false);
+  const [nicknameMsg, setNicknameMsg] = useState("");
+
   useEffect(() => {
     const onResize = () => { setIsMobile(window.innerWidth < 768); setIsWideScreen(window.innerWidth >= 1100); };
     window.addEventListener("resize", onResize);
@@ -802,8 +818,14 @@ function LyricsArchive() {
     loadCatalog("mark-catalog", DEFAULT_MARK_CATALOG).then(setMarkCatalog);
     loadCatalog("point-catalog", DEFAULT_POINT_CATALOG).then(setPointCatalog);
     loadCatalog("reaction-catalog", DEFAULT_REACTION_TYPES).then(setReactionTypes);
-    const unsub = fbAuth.onAuthStateChanged((fbUser) => {
-      setUser(fbUser ? { id: fbUser.uid, name: fbUser.displayName || fbUser.email || "名無しさん", photoURL: fbUser.photoURL || null } : null);
+    const unsub = fbAuth.onAuthStateChanged(async (fbUser) => {
+      if (!fbUser) { setUser(null); setNickname(""); setAuthLoading(false); return; }
+      const googleName = fbUser.displayName || fbUser.email || "名無しさん";
+      // ★Phase4: 表示優先順位はニックネーム→Google表示名。users/{uid}を読んで解決する。
+      const profile = await getUserProfile(fbUser.uid);
+      const nick = (profile && profile.nickname) ? profile.nickname : "";
+      setNickname(nick);
+      setUser({ id: fbUser.uid, googleName, name: nick || googleName, photoURL: fbUser.photoURL || null });
       setAuthLoading(false);
     });
     return () => unsub();
@@ -816,6 +838,24 @@ function LyricsArchive() {
   function logout() {
     fbAuth.signOut();
     if (mode === "mypage") setMode(selectedSong ? "view" : "empty");
+    setNicknameDraft(""); setNicknameMsg("");
+  }
+
+  // ★Phase4: ニックネーム保存。空文字保存=ニックネーム未設定に戻す(Google表示名を使用)。
+  async function saveNickname() {
+    if (!user) return;
+    const trimmed = nicknameDraft.trim();
+    if (trimmed.length > 20) { setNicknameMsg("⚠ ニックネームは20文字以内で入力してください。"); return; }
+    setNicknameSaving(true); setNicknameMsg("");
+    try {
+      await setUserProfile(user.id, { nickname: trimmed });
+      setNickname(trimmed);
+      setUser(Object.assign({}, user, { name: trimmed || user.googleName }));
+      setNicknameMsg(trimmed ? "✅ ニックネームを保存しました。" : "✅ ニックネームを削除しました(Google表示名を使用します)。");
+    } catch (e) {
+      setNicknameMsg("⚠ 保存に失敗しました: " + e.message);
+    }
+    setNicknameSaving(false);
   }
 
   async function runMigration() {
@@ -1244,7 +1284,7 @@ function LyricsArchive() {
         ] : E("button", { onClick: login, style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12, color: C.brass, background: "none", border: "none", cursor: "pointer" } }, "🔑 Googleでログイン")
       ),
       authError && E("div", { key: "aerr", style: { color: C.wax, fontSize: 10, fontFamily: FONT_M, marginTop: 6 } }, authError),
-      user && E("button", { key: "mp", onClick: () => setMode("mypage"), style: { width: "100%", marginTop: 8, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 11, color: mode === "mypage" ? C.ink : C.paperTextDim, background: mode === "mypage" ? C.brass : "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 5, padding: "6px 0", cursor: "pointer" } }, `📋 マイページ (${mySongs.length})`),
+      user && E("button", { key: "mp", onClick: () => { setNicknameDraft(nickname); setNicknameMsg(""); setMode("mypage"); }, style: { width: "100%", marginTop: 8, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 11, color: mode === "mypage" ? C.ink : C.paperTextDim, background: mode === "mypage" ? C.brass : "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 5, padding: "6px 0", cursor: "pointer" } }, `📋 マイページ (${mySongs.length})`),
       user && E("div", { key: "migrate", style: { marginTop: 8, borderTop: `1px dashed ${C.inkBorder}`, paddingTop: 8 } }, [
         E("button", { key: "btn", onClick: runMigration, disabled: migrating, style: { width: "100%", fontSize: 10, color: C.brassDim, background: "none", border: `1px dashed ${C.brassDim}`, borderRadius: 4, padding: "5px 0", cursor: migrating ? "default" : "pointer", opacity: migrating ? 0.6 : 1 } }, migrating ? "移行中..." : "⚙ Claude内データをFirestoreへ移行"),
         migrateMsg && E("div", { key: "msg", style: { fontSize: 10, color: C.paperTextDim, marginTop: 4, fontFamily: FONT_M, lineHeight: 1.5 } }, migrateMsg),
@@ -1281,6 +1321,16 @@ function LyricsArchive() {
   else if (mode === "mypage") {
     mainContent = E("div", { style: { maxWidth: 768, margin: "0 auto", padding: "32px 24px" } }, [
       E("div", { key: "h", style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 16 } }, E("span", { style: { fontFamily: FONT_D, color: C.paperText, fontSize: 18 } }, "📋 マイページ")),
+      // ★Phase4: プロフィール設定(ニックネーム)。表示優先順位はニックネーム→Google表示名。
+      E("div", { key: "profile-set", style: { background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 4, padding: "16px 18px", marginBottom: 20 } }, [
+        E("div", { key: "lbl", style: { fontFamily: FONT_D, color: C.inkText, fontSize: 14, marginBottom: 8 } }, "👤 プロフィール設定"),
+        E("div", { key: "help", style: { fontFamily: FONT_M, color: "#8A8060", fontSize: 11, marginBottom: 10, lineHeight: 1.6 } }, `表示名の優先順位: ニックネーム → Google表示名(${user ? user.googleName : ""})。空にして保存するとGoogle表示名に戻ります。`),
+        E("div", { key: "row", style: { display: "flex", gap: 8 } }, [
+          E("input", { key: "in", value: nicknameDraft, onChange: (ev) => setNicknameDraft(ev.target.value), placeholder: "ニックネーム(未設定時はGoogle表示名)", maxLength: 20, style: Object.assign({}, inputStyle, { flex: 1 }) }),
+          E("button", { key: "save", onClick: saveNickname, disabled: nicknameSaving, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 4, padding: "0 16px", fontSize: 12, fontWeight: 600, cursor: nicknameSaving ? "default" : "pointer", opacity: nicknameSaving ? 0.6 : 1 } }, nicknameSaving ? "保存中..." : "保存"),
+        ]),
+        nicknameMsg && E("div", { key: "msg", style: { fontFamily: FONT_M, fontSize: 11, color: C.brassDim, marginTop: 8 } }, nicknameMsg),
+      ]),
       E("div", { key: "stat", style: { color: C.paperTextDim, fontSize: 12, marginBottom: 16, fontFamily: FONT_M } }, `${user ? user.name : ""} さんが登録した歌詞: ${mySongs.length}曲 ・ 累計リアクション: ${mySongs.reduce((a, s) => a + (s.reactionTotal || 0), 0)}`),
       E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } },
         mySongs.length === 0 ? E("div", { style: { color: C.paperTextDim, fontSize: 12 } }, "まだ歌詞を登録していません。") :
