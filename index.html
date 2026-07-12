@@ -670,6 +670,9 @@ function LyricsArchive() {
   const [draftMarks, setDraftMarks] = useState([]);
   const [draftPoints, setDraftPoints] = useState([]);
   const [draftRubies, setDraftRubies] = useState([]);
+  // ★Phase3: Undo履歴。draftParts/draftMarks/draftPoints/draftRubiesの変更直前のスナップショットをスタックで保持する。
+  // 保存(Firestore)には影響しない、annotate画面内だけのメモリ上の履歴(最大50件)。
+  const [undoStack, setUndoStack] = useState([]);
   const [rubyText, setRubyText] = useState("");
   const [autoRubyBusy, setAutoRubyBusy] = useState(false);
   const [autoRubyError, setAutoRubyError] = useState("");
@@ -813,7 +816,22 @@ function LyricsArchive() {
   function openAnnotate() {
     if (!selectedSong) return;
     setDraftParts(selectedSong.parts || []); setDraftMarks(selectedSong.marks || []); setDraftPoints(selectedSong.points || []); setDraftRubies(selectedSong.rubies || []);
-    setSelRange(null); setSelRect(null); setPaintPart(null); setStampType(null); setRubyText(""); setAutoRubyError(""); setMode("annotate");
+    setSelRange(null); setSelRect(null); setPaintPart(null); setStampType(null); setRubyText(""); setAutoRubyError(""); setUndoStack([]); setMode("annotate");
+  }
+  // ★Phase3: 変更を加える直前の状態をUndoスタックへ積む。最大50件を超えたら古いものから捨てる。
+  function pushUndoSnapshot() {
+    const snap = { parts: draftParts, marks: draftMarks, points: draftPoints, rubies: draftRubies };
+    setUndoStack((prev) => {
+      const next = prev.concat([snap]);
+      return next.length > 50 ? next.slice(next.length - 50) : next;
+    });
+  }
+  // ★Phase3: Undoスタックの先頭(直前の状態)へ4種類のdraftをまとめて巻き戻す。
+  function undoAnnotation() {
+    if (undoStack.length === 0) return;
+    const last = undoStack[undoStack.length - 1];
+    setDraftParts(last.parts); setDraftMarks(last.marks); setDraftPoints(last.points); setDraftRubies(last.rubies);
+    setUndoStack((prev) => prev.slice(0, -1));
   }
 
   async function saveForm() {
@@ -896,10 +914,12 @@ function LyricsArchive() {
   function applyPart(colorId, rangeOverride) {
     const r = rangeOverride || selRange;
     if (!r) return;
+    pushUndoSnapshot();
     setDraftParts((prev) => prev.filter((p) => p.end <= r.start || p.start >= r.end).concat([{ id: newId(), start: r.start, end: r.end, colorId }]));
     const s = window.getSelection(); if (s) s.removeAllRanges();
   }
   function placeStamp(position, typeId) {
+    pushUndoSnapshot();
     setDraftPoints((prev) => {
       const exists = prev.some((pt) => pt.position === position && pt.typeId === typeId);
       if (exists) return prev.filter((pt) => !(pt.position === position && pt.typeId === typeId));
@@ -932,12 +952,24 @@ function LyricsArchive() {
   function armStampType(id) { setPaintPart(null); setStampType((prev) => (prev === id ? null : id)); }
   useEffect(() => {
     if (mode !== "annotate") return;
-    function onKey(ev) { if (ev.key === "Escape") { setPaintPart(null); setStampType(null); } }
+    function onKey(ev) {
+      if (ev.key === "Escape") { setPaintPart(null); setStampType(null); return; }
+      // ★Phase3: Ctrl+Z(Windows)/Cmd+Z(Mac)でUndo。ただし入力欄(ルビ入力など)にフォーカスがある場合は
+      // ブラウザ標準のテキスト入力Undoを優先させたいので、こちらの処理は行わない。
+      const isUndoCombo = (ev.ctrlKey || ev.metaKey) && !ev.shiftKey && (ev.key === "z" || ev.key === "Z");
+      if (isUndoCombo) {
+        const tag = ev.target && ev.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        ev.preventDefault();
+        undoAnnotation();
+      }
+    }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [mode]);
+  }, [mode, undoStack, draftParts, draftMarks, draftPoints, draftRubies]);
   function applyMark(typeId) {
     if (!selRange) return;
+    pushUndoSnapshot();
     setDraftMarks((prev) => prev.filter((m) => !(m.typeId === typeId && !(m.end <= selRange.start || m.start >= selRange.end))).concat([{ id: newId(), start: selRange.start, end: selRange.end, typeId }]));
   }
   // ルビは範囲(選択したまま)に対して1個まで。同じ範囲に既存ルビがあれば置き換え(編集)、
@@ -946,10 +978,12 @@ function LyricsArchive() {
     if (!selRange) return;
     const trimmed = (text || "").trim();
     if (!trimmed) return;
+    pushUndoSnapshot();
     setDraftRubies((prev) => prev.filter((r) => !(r.start === selRange.start && r.end === selRange.end)).concat([{ id: newId(), start: selRange.start, end: selRange.end, text: trimmed }]));
   }
   function deleteRubyInSelection() {
     if (!selRange) return;
+    pushUndoSnapshot();
     setDraftRubies((prev) => prev.filter((r) => !(r.start === selRange.start && r.end === selRange.end)));
     setRubyText("");
   }
@@ -965,8 +999,12 @@ function LyricsArchive() {
       setAutoRubyStatus("歌詞を解析中...");
       const tokens = await withTimeout(tokenizeWithWorker(worker, selectedSong.lyrics), 30000, "解析がタイムアウトしました");
       const suggestions = buildAutoRubies(selectedSong.lyrics, tokens, draftRubies);
-      setDraftRubies((prev) => prev.concat(suggestions));
-      if (suggestions.length === 0) setAutoRubyError("新たに追加できるルビは見つかりませんでした。");
+      if (suggestions.length > 0) {
+        pushUndoSnapshot();
+        setDraftRubies((prev) => prev.concat(suggestions));
+      } else {
+        setAutoRubyError("新たに追加できるルビは見つかりませんでした。");
+      }
     } catch (e) {
       resetFuriganaWorker(); // 次回また最初からWorkerを立ち上げ直せるようにする
       if (e && /タイムアウトしました$/.test(e.message || "")) {
@@ -981,6 +1019,7 @@ function LyricsArchive() {
   }
   function clearSelection() {
     if (!selRange) return;
+    pushUndoSnapshot();
     setDraftParts((prev) => prev.filter((p) => p.end <= selRange.start || p.start >= selRange.end));
     setDraftMarks((prev) => prev.filter((m) => m.end <= selRange.start || m.start >= selRange.end));
     setDraftPoints((prev) => prev.filter((pt) => pt.position < selRange.start || pt.position > selRange.end));
@@ -1246,6 +1285,7 @@ function LyricsArchive() {
     const header = E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 } }, [
       E("span", { key: "t", style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, "✨ パート・記号を編集"),
       E("div", { key: "btns", style: { display: "flex", gap: 8, flexWrap: "wrap" } }, [
+        E("button", { key: "undo", onClick: undoAnnotation, disabled: undoStack.length === 0, title: "Ctrl+Z (Mac: Cmd+Z)", style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: undoStack.length === 0 ? "default" : "pointer", opacity: undoStack.length === 0 ? 0.4 : 1 } }, `↶ 元に戻す${undoStack.length > 0 ? ` (${undoStack.length})` : ""}`),
         E("button", { key: "auto", onClick: runAutoRuby, disabled: autoRubyBusy, style: { fontSize: 11, color: C.ink, background: C.brass, border: "none", borderRadius: 4, padding: "5px 9px", cursor: autoRubyBusy ? "default" : "pointer", opacity: autoRubyBusy ? 0.6 : 1, fontWeight: 600 } }, autoRubyBusy ? "解析中..." : "🪄 自動でルビを振る"),
         E("button", { key: "p", onClick: () => { closeToolbar(); setCatalogModal("part"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ パート色を管理"),
         E("button", { key: "m", onClick: () => { closeToolbar(); setCatalogModal("mark"); }, style: { fontSize: 11, color: C.paperText, background: "transparent", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer" } }, "⚙ マーカーを管理"),
