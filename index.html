@@ -1026,6 +1026,18 @@ function LyricsArchive() {
     setDraftRubies((prev) => prev.filter((r) => r.end <= selRange.start || r.start >= selRange.end));
     const s = window.getSelection(); if (s) s.removeAllRanges();
   }
+  // 選択範囲内のマーカーだけを解除する(パート・記号・ルビは残す)
+  function clearMarksInSelection() {
+    if (!selRange) return;
+    pushUndoSnapshot();
+    setDraftMarks((prev) => prev.filter((m) => m.end <= selRange.start || m.start >= selRange.end));
+  }
+  // 選択範囲内の記号(スタンプ)だけを解除する(パート・マーカー・ルビは残す)
+  function clearPointsInSelection() {
+    if (!selRange) return;
+    pushUndoSnapshot();
+    setDraftPoints((prev) => prev.filter((pt) => pt.position < selRange.start || pt.position > selRange.end));
+  }
   function closeToolbar() {
     const s = window.getSelection(); if (s) s.removeAllRanges();
     if (document.activeElement && toolbarRef.current && toolbarRef.current.contains(document.activeElement)) document.activeElement.blur();
@@ -1332,8 +1344,15 @@ function LyricsArchive() {
       }, [
         E("div", { key: "sel", style: { fontFamily: FONT_M, fontSize: 10, color: C.paperTextDim, marginBottom: 6 } }, `選択中: 「${selectedSong.lyrics.slice(selRange.start, selRange.end).slice(0, 16)}${selRange.end - selRange.start > 16 ? "…" : ""}」`),
         E("div", { key: "marks", style: { marginBottom: 8 } }, [
-          E("div", { key: "l", style: { fontSize: 9, color: "#8A8060", marginBottom: 4, fontFamily: FONT_M } }, "マーカー(選択範囲をハイライト)"),
+          E("div", { key: "l", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 } }, [
+            E("span", { key: "t", style: { fontSize: 9, color: "#8A8060", fontFamily: FONT_M } }, "マーカー(選択範囲をハイライト)"),
+            draftMarks.some((m) => !(m.end <= selRange.start || m.start >= selRange.end)) && E("button", { key: "clr", onClick: clearMarksInSelection, style: { fontSize: 9, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 3, padding: "1px 6px", cursor: "pointer" } }, "マーカーのみ解除"),
+          ]),
           E("div", { key: "row", style: { display: "flex", gap: 5, flexWrap: "wrap" } }, markCatalog.map((m) => E("button", { key: m.id, onClick: () => applyMark(m.id), style: { fontSize: 11, color: C.paperText, fontFamily: FONT_B, background: `${m.color}33`, border: `1px solid ${m.color}`, borderRadius: 12, padding: "4px 9px", cursor: "pointer" } }, m.label))),
+        ]),
+        draftPoints.some((pt) => pt.position >= selRange.start && pt.position <= selRange.end) && E("div", { key: "points", style: { marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" } }, [
+          E("span", { key: "t", style: { fontSize: 9, color: "#8A8060", fontFamily: FONT_M } }, "記号(選択範囲内)"),
+          E("button", { key: "clr", onClick: clearPointsInSelection, style: { fontSize: 9, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 3, padding: "1px 6px", cursor: "pointer" } }, "記号のみ解除"),
         ]),
         E("div", { key: "ruby", style: { marginBottom: 8 } }, [
           E("div", { key: "l", style: { fontSize: 9, color: "#8A8060", marginBottom: 4, fontFamily: FONT_M } }, "ルビ(よみがな)"),
@@ -1347,8 +1366,8 @@ function LyricsArchive() {
             draftRubies.some((r) => r.start === selRange.start && r.end === selRange.end) && E("button", { key: "del", onClick: deleteRubyInSelection, style: { fontSize: 10, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 4, padding: "5px 9px", cursor: "pointer", whiteSpace: "nowrap" } }, "削除"),
           ]),
         ]),
-        E("div", { key: "act", style: { display: "flex", gap: 6 } }, [
-          E("button", { key: "clr", onClick: clearSelection, style: { fontSize: 10, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 4, padding: "4px 9px", cursor: "pointer" } }, "選択範囲の装飾を解除"),
+        E("div", { key: "act", style: { display: "flex", gap: 6, flexWrap: "wrap" } }, [
+          E("button", { key: "clr", onClick: clearSelection, style: { fontSize: 10, color: C.wax, background: "none", border: `1px solid ${C.wax}`, borderRadius: 4, padding: "4px 9px", cursor: "pointer" } }, "すべて解除(パート/マーカー/記号/ルビ)"),
           E("button", { key: "cls", onClick: closeToolbar, style: { fontSize: 10, color: C.paperTextDim, background: "none", border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "4px 9px", cursor: "pointer" } }, "閉じる"),
         ]),
       ]),
