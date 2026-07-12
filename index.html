@@ -483,7 +483,7 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
     });
   }
   const nodes = [E(React.Fragment, { key: "pt-0" }, renderPointsAt(0))];
-  segments.forEach((seg, i) => {
+  function segStyleAndTitleOf(seg) {
     const partDef = seg.part ? (partCatalog || []).find((p) => p.id === seg.part.colorId) : null;
     const markDefs = (seg.marksHere || []).map((m) => (markCatalog || []).find((mc) => mc.id === m.typeId)).filter(Boolean);
     const segStyle = {
@@ -493,16 +493,47 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       borderRadius: 2,
     };
     const title = markDefs.length ? markDefs.map((m) => m.label).join(" / ") : undefined;
+    return { segStyle, title };
+  }
+  // ★ルビの範囲内(文字と文字の間)に記号(スタンプ)を挿入した場合、その記号を「本文の行」ではなく
+  // 「ふりがなの行」の方に差し込んで表示する(例: 本[記号]棚 ではなく ほん[記号]だな のように上段に出す)。
+  // ルビの文字列には1文字ごとの対応が保存されていないため、各セグメントの本文の文字数比率で
+  // ふりがな文字列を按分して振り分ける(複合語の読みが不均等な場合は多少の誤差が出ることがある)。
+  let i = 0;
+  while (i < segments.length) {
+    const seg = segments[i];
     if (seg.ruby && seg.ruby.text) {
-      nodes.push(E("ruby", { key: "seg-" + i, title }, [
-        E("span", { key: "base", style: segStyle }, seg.text),
-        E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, fontWeight: 500, color: "#8A6D3C", userSelect: "none" } }, seg.ruby.text),
-      ]));
+      const group = [seg];
+      let j = i + 1;
+      while (j < segments.length && segments[j].ruby === seg.ruby) { group.push(segments[j]); j++; }
+      const rubyStr = seg.ruby.text;
+      const totalBaseLen = group.reduce((sum, g) => sum + g.text.length, 0) || 1;
+      let runningBase = 0;
+      const boundaries = [0];
+      group.forEach((gseg) => { runningBase += gseg.text.length; boundaries.push(Math.round((runningBase / totalBaseLen) * rubyStr.length)); });
+      group.forEach((gseg, gi) => {
+        const { segStyle, title } = segStyleAndTitleOf(gseg);
+        const subReading = rubyStr.slice(boundaries[gi], boundaries[gi + 1]);
+        const isLastInGroup = gi === group.length - 1;
+        const midSymbols = !isLastInGroup ? renderPointsAt(gseg.end) : null; // ルビの内側の区切りにある記号→ふりがな行へ
+        nodes.push(E("ruby", { key: `seg-${i}-${gi}` }, [
+          E("span", { key: "base", style: segStyle, title }, gseg.text),
+          E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, fontWeight: 500, color: "#8A6D3C", userSelect: "none" } }, [
+            E("span", { key: "txt" }, subReading),
+            midSymbols ? E("span", { key: "sym", "data-annot-skip": "true", style: { margin: "0 1px" } }, midSymbols) : null,
+          ]),
+        ]));
+      });
+      const lastEnd = group[group.length - 1].end;
+      nodes.push(E(React.Fragment, { key: "pt-" + lastEnd }, renderPointsAt(lastEnd))); // ルビ全体の外側との境目の記号は従来通り本文行
+      i = j;
     } else {
+      const { segStyle, title } = segStyleAndTitleOf(seg);
       nodes.push(E("span", { key: "seg-" + i, title, style: segStyle }, seg.text));
+      nodes.push(E(React.Fragment, { key: "pt-" + seg.end }, renderPointsAt(seg.end)));
+      i++;
     }
-    nodes.push(E(React.Fragment, { key: "pt-" + seg.end }, renderPointsAt(seg.end)));
-  });
+  }
   return E("div", {
     ref: containerRef,
     onMouseUp: interactive ? onMouseUp : undefined,
