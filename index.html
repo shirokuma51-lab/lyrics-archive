@@ -691,7 +691,8 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
     onMouseUp: interactive ? onMouseUp : undefined,
     onTouchEnd: interactive ? onTouchEnd : undefined,
     style: {
-      fontFamily: FONT_M, color: C.inkText, fontSize: 14, lineHeight: 2.1, whiteSpace: "pre-wrap",
+      // ★行間を広げ、ふりがな・記号(特に文字の真上に二段重ねになる場合)が前の行と重なって見えなくならないようにしている
+      fontFamily: FONT_M, color: C.inkText, fontSize: 14, lineHeight: 3.6, whiteSpace: "pre-wrap",
       userSelect: "text", WebkitUserSelect: "text", WebkitTouchCallout: "default",
       cursor: interactive ? "text" : "default",
     },
