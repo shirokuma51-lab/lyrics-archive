@@ -898,16 +898,68 @@ function ShareLockedCard({ song, onSubmit, error, busy }) {
   ]);
 }
 
-function CatalogModal({ title, items, hasSymbol, hasPlacement, onClose, onAdd, onUpdate, onDelete, onReset }) {
+function CatalogModal({ title, items, hasSymbol, hasPlacement, onClose, onAdd, onUpdate, onDelete, onReset, onReorder }) {
+  // ★Phase7: 並び替え。ドラッグ中はローカルのorder(id配列)だけを動かし、指を離した時に1回だけonReorderで確定する。
+  const [order, setOrder] = useState(items.map((it) => it.id));
+  const [dragId, setDragId] = useState(null);
+  const draggingRef = useRef(false);
+  useEffect(() => {
+    if (draggingRef.current) return; // ドラッグ中に外部からitemsが更新されても並びを上書きしない
+    setOrder(items.map((it) => it.id));
+  }, [items]);
+  const byId = {};
+  items.forEach((it) => { byId[it.id] = it; });
+  const orderedItems = order.map((id) => byId[id]).filter(Boolean);
+  items.forEach((it) => { if (orderedItems.indexOf(it) === -1) orderedItems.push(it); }); // 追加直後などの取りこぼし保険
+
+  function moveOver(overId) {
+    if (!dragId || dragId === overId) return;
+    setOrder((prev) => {
+      const from = prev.indexOf(dragId), to = prev.indexOf(overId);
+      if (from === -1 || to === -1) return prev;
+      const next = prev.slice();
+      next.splice(from, 1);
+      next.splice(to, 0, dragId);
+      return next;
+    });
+  }
+  function handleDragPointerDown(ev, id) {
+    ev.preventDefault();
+    try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch (e) {}
+    draggingRef.current = true;
+    setDragId(id);
+  }
+  function handleDragPointerMove(ev) {
+    if (!draggingRef.current) return;
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const row = el && el.closest ? el.closest("[data-cat-id]") : null;
+    if (row) moveOver(row.getAttribute("data-cat-id"));
+  }
+  function handleDragPointerUp(ev) {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    setDragId(null);
+    try { ev.currentTarget.releasePointerCapture(ev.pointerId); } catch (e) {}
+    setOrder((finalOrder) => { onReorder(finalOrder); return finalOrder; });
+  }
   return E("div", { style: { position: "fixed", inset: 0, zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 16px", background: "rgba(0,0,0,0.55)" } },
     E("div", { style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "20px 22px", width: 420, maxHeight: "80vh", overflowY: "auto" } }, [
       E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 } },
         E("span", { style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, title),
         E("button", { onClick: onClose, style: { background: "none", border: "none", cursor: "pointer", color: C.paperTextDim, fontSize: 16 } }, "×")),
-      E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } }, items.map((it) => {
+      E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } }, orderedItems.map((it) => {
         const placement = it.placement === "above" ? "above" : "between"; // ★Phase6: 未指定は従来通り「文字と文字の間」扱い
-        return E("div", { key: it.id, style: { display: "flex", flexDirection: "column", gap: 6, background: C.ink, border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "6px 8px" } }, [
+        const isDragging = dragId === it.id;
+        return E("div", { key: it.id, "data-cat-id": it.id, style: { display: "flex", flexDirection: "column", gap: 6, background: C.ink, border: `1px solid ${isDragging ? C.brass : C.inkBorder}`, borderRadius: 4, padding: "6px 8px", opacity: isDragging ? 0.55 : 1 } }, [
           E("div", { key: "row1", style: { display: "flex", alignItems: "center", gap: 8 } }, [
+            E("span", {
+              key: "grip", title: "ドラッグして並び替え",
+              onPointerDown: (ev) => handleDragPointerDown(ev, it.id),
+              onPointerMove: handleDragPointerMove,
+              onPointerUp: handleDragPointerUp,
+              onPointerCancel: handleDragPointerUp,
+              style: { cursor: "grab", color: C.paperTextDim, fontSize: 16, padding: "0 2px", touchAction: "none", userSelect: "none" },
+            }, "⠿"),
             E("input", { key: "c", type: "color", value: it.color, onChange: (ev) => onUpdate(it.id, { color: ev.target.value }), style: { width: 28, height: 28, border: "none", background: "none", cursor: "pointer", padding: 0 } }),
             hasSymbol && E("input", { key: "s", value: it.symbol || "", onChange: (ev) => onUpdate(it.id, { symbol: ev.target.value.slice(0, 4) }), style: { width: 44, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_M, fontSize: 12, padding: "4px 6px", textAlign: "center" } }),
             E("input", { key: "l", value: it.label, onChange: (ev) => onUpdate(it.id, { label: ev.target.value }), style: { flex: 1, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_B, fontSize: 13, padding: "5px 8px" } }),
@@ -924,7 +976,7 @@ function CatalogModal({ title, items, hasSymbol, hasPlacement, onClose, onAdd, o
         E("button", { key: "add", onClick: onAdd, style: { display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px dashed ${C.brassDim}`, borderRadius: 4, padding: "7px 10px", color: C.brass, fontSize: 12, cursor: "pointer", fontFamily: FONT_M } }, "＋ 追加する"),
         onReset && E("button", { key: "reset", onClick: onReset, style: { display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px dashed ${C.inkBorder}`, borderRadius: 4, padding: "7px 10px", color: C.paperTextDim, fontSize: 12, cursor: "pointer", fontFamily: FONT_M } }, "⟲ 初期値に戻す"),
       ]),
-      E("div", { key: "note", style: { fontSize: 11, color: C.paperTextDim, marginTop: 12, fontFamily: FONT_B, lineHeight: 1.6 } }, hasPlacement ? "ここでの変更は共有データとして全員に反映されます。「文字の真上」にするとスタンプ時にルビ(ふりがな)があればその上に重ねて表示されます。" : "ここでの変更は共有データとして全員に反映されます。色や記号、ラベルはあとから自由に変更できます。"),
+      E("div", { key: "note", style: { fontSize: 11, color: C.paperTextDim, marginTop: 12, fontFamily: FONT_B, lineHeight: 1.6 } }, (hasPlacement ? "ここでの変更は共有データとして全員に反映されます。「文字の真上」にするとスタンプ時にルビ(ふりがな)があればその上に重ねて表示されます。" : "ここでの変更は共有データとして全員に反映されます。色や記号、ラベルはあとから自由に変更できます。") + " ⠿を掴んでドラッグすると順番を変更できます(スマホのタップ&ドラッグにも対応)。"),
     ])
   );
 }
@@ -1602,6 +1654,18 @@ function LyricsArchive() {
     setList(defaults);
     saveCatalog(key, defaults);
   }
+  // ★Phase7: 管理画面での並び替え。idの並び順(order)を受け取り、それに合わせてカタログ配列を並べ替えて保存する。
+  // 配列の並び順=表示順としてそのまま使っているので、Firestoreへの保存が完了すればすぐに一覧・スタンプボタン等に反映される。
+  function reorderCatalogItem(kind, idOrder) {
+    const [list, setList, key] = catalogStateFor(kind);
+    const byId = {};
+    list.forEach((it) => { byId[it.id] = it; });
+    const next = idOrder.map((id) => byId[id]).filter(Boolean);
+    list.forEach((it) => { if (next.indexOf(it) === -1) next.push(it); });
+    if (next.length === list.length && next.every((it, i) => it === list[i])) return; // 変化なしなら何もしない
+    setList(next);
+    saveCatalog(key, next);
+  }
 
   const isFormMode = mode === "edit" || mode === "new";
   const editable = canEditSong(selectedSong);
@@ -1885,9 +1949,9 @@ function LyricsArchive() {
     sidebar, mainPanel,
     legacyGate && E(LegacyPinGate, { key: "legacy", onSubmit: submitLegacyGate, onCancel: () => setLegacyGate(null), error: legacyGateError, busy: legacyGateBusy }),
     shareModal && selectedSong && E(ShareModal, { key: "share", song: selectedSong, canEdit: canEditSong(selectedSong), onClose: () => setShareModal(false), onSave: saveShareSettings, saving: shareSaving, saveMsg: shareSaveMsg }),
-    catalogModal === "part" && E(CatalogModal, { key: "catp", title: "パート色を管理", items: partCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("part"), onUpdate: (id, patch) => updateCatalogItem("part", id, patch), onDelete: (id) => deleteCatalogItem("part", id), onReset: () => resetCatalogToDefault("part") }),
-    catalogModal === "mark" && E(CatalogModal, { key: "catm", title: "マーカー(ハイライト)を管理", items: markCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("mark"), onUpdate: (id, patch) => updateCatalogItem("mark", id, patch), onDelete: (id) => deleteCatalogItem("mark", id), onReset: () => resetCatalogToDefault("mark") }),
-    catalogModal === "point" && E(CatalogModal, { key: "catpt", title: "記号(ブレス・ロングトーン等)を管理", items: pointCatalog, hasSymbol: true, hasPlacement: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("point"), onUpdate: (id, patch) => updateCatalogItem("point", id, patch), onDelete: (id) => deleteCatalogItem("point", id), onReset: () => resetCatalogToDefault("point") }),
+    catalogModal === "part" && E(CatalogModal, { key: "catp", title: "パート色を管理", items: partCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("part"), onUpdate: (id, patch) => updateCatalogItem("part", id, patch), onDelete: (id) => deleteCatalogItem("part", id), onReset: () => resetCatalogToDefault("part"), onReorder: (order) => reorderCatalogItem("part", order) }),
+    catalogModal === "mark" && E(CatalogModal, { key: "catm", title: "マーカー(ハイライト)を管理", items: markCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("mark"), onUpdate: (id, patch) => updateCatalogItem("mark", id, patch), onDelete: (id) => deleteCatalogItem("mark", id), onReset: () => resetCatalogToDefault("mark"), onReorder: (order) => reorderCatalogItem("mark", order) }),
+    catalogModal === "point" && E(CatalogModal, { key: "catpt", title: "記号(ブレス・ロングトーン等)を管理", items: pointCatalog, hasSymbol: true, hasPlacement: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("point"), onUpdate: (id, patch) => updateCatalogItem("point", id, patch), onDelete: (id) => deleteCatalogItem("point", id), onReset: () => resetCatalogToDefault("point"), onReorder: (order) => reorderCatalogItem("point", order) }),
   ]);
 }
 
