@@ -589,6 +589,23 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
     for (let p = s; p < e; p++) if (abovePointsByPos[p]) return true;
     return false;
   }
+  // ★Phase6(修正): 文字の真上の記号は、入れ子のrubyだとブラウザによって再描画のタイミングでレイアウトが更新されず
+  // 「データは登録されているのに表示上だけ現れない」ことがあったため、position:absoluteで確実に重ねる方式に変更。
+  // baseNode(通常の文字、またはふりがな付きのruby)の上端よりさらに上に、記号を絶対配置で乗せる。
+  function withAboveSymbols(key, baseNode, syms) {
+    if (!syms || syms.length === 0) return baseNode;
+    return E("span", { key, style: { position: "relative", display: "inline-block" } }, [
+      E("span", {
+        key: "abv", "data-annot-skip": "true",
+        style: {
+          position: "absolute", left: "50%", bottom: "100%", transform: "translateX(-50%)",
+          marginBottom: 2, whiteSpace: "nowrap", fontFamily: FONT_M, fontSize: 10, lineHeight: 1,
+          pointerEvents: "none",
+        },
+      }, syms),
+      baseNode,
+    ]);
+  }
   const nodes = [E(React.Fragment, { key: "pt-0" }, renderPointsAt(0))];
   function segStyleAndTitleOf(seg) {
     const partDef = seg.part ? (partCatalog || []).find((p) => p.id === seg.part.colorId) : null;
@@ -610,8 +627,8 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
   // その場合は本文側は分割せず(1文字のまま)、ふりがな側だけを内部で区切って記号を挟み込む。
   // 各ふりがな断片には data-ruby-id / data-ruby-base-offset を付与し、クリック位置→ルビ内オフセットの
   // 逆算(getRubyClickTarget)に使えるようにしている。
-  // ★Phase6: 「文字の真上」記号は入れ子のrubyで実現する。ルビ(ふりがな)が付いている文字にかぶった場合は
-  // 外側rubyのrtに記号、内側rubyのrtにふりがな、という二段重ねになり、結果的に「ふりがなの、さらに上」に記号が出る。
+  // ★文字の真上の記号は、position:absoluteで文字(またはふりがな付きruby)の真上に重ねて表示する(withAboveSymbols)。
+  // ふりがなが付いている文字の場合は、ふりがなを含むruby全体の上端よりさらに上に乗るので「ふりがなの上に記号」になる。
   let i = 0;
   while (i < segments.length) {
     const seg = segments[i];
@@ -646,14 +663,12 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
           E("span", { key: "base", style: segStyle, title }, gseg.text),
           E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, fontWeight: 500, color: "#8A6D3C", userSelect: "none" } }, rtChildren),
         ];
-        // ★Phase6: このgsegの範囲内に「文字の真上」記号があれば、ふりがなのさらに上に二段目のrtとして重ねる(入れ子ruby)
+        const rubyNode = E("ruby", { key: "ruby" }, rubyChildren);
+        // ★このgsegの範囲内に「文字の真上」記号があれば、ふりがなのさらに上に重ねて表示する
         if (hasAboveIn(gseg.start, gseg.end)) {
           const aboveSyms = [];
           for (let p = gseg.start; p < gseg.end; p++) { const s = renderAboveSymbolsAt(p); if (s) aboveSyms.push.apply(aboveSyms, s); }
-          nodes.push(E("ruby", { key: `seg-${i}-${gi}` }, [
-            E("ruby", { key: "inner" }, rubyChildren),
-            E("rt", { key: "ort", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 9, lineHeight: 1, userSelect: "none" } }, aboveSyms),
-          ]));
+          nodes.push(withAboveSymbols(`seg-${i}-${gi}`, rubyNode, aboveSyms));
         } else {
           nodes.push(E("ruby", { key: `seg-${i}-${gi}` }, rubyChildren));
         }
@@ -666,17 +681,15 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       if (!hasAboveIn(seg.start, seg.end)) {
         nodes.push(E("span", { key: "seg-" + i, title, style: segStyle }, seg.text));
       } else {
-        // ★Phase6: 区間内に「文字の真上」記号があるので、対象の文字だけrubyで包んで真上に記号を出す(ふりがなが無い文字の場合)
+        // ★区間内に「文字の真上」記号があるので、対象の文字だけ真上に記号を重ねて出す(ふりがなが無い文字の場合)
         const runs = [];
         let cursor = seg.start;
         for (let p = seg.start; p < seg.end; p++) {
           if (!abovePointsByPos[p]) continue;
           if (p > cursor) runs.push(E("span", { key: "pre" + p, title, style: segStyle }, text.slice(cursor, p)));
           const syms = renderAboveSymbolsAt(p);
-          runs.push(E("ruby", { key: "ab" + p }, [
-            E("span", { key: "b", title, style: segStyle }, text.slice(p, p + 1)),
-            E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, lineHeight: 1, userSelect: "none" } }, syms),
-          ]));
+          const charNode = E("span", { key: "b", title, style: segStyle }, text.slice(p, p + 1));
+          runs.push(withAboveSymbols("ab" + p, charNode, syms));
           cursor = p + 1;
         }
         if (cursor < seg.end) runs.push(E("span", { key: "post", title, style: segStyle }, text.slice(cursor, seg.end)));
