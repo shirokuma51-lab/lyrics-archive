@@ -542,12 +542,30 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
     });
     return map;
   }, [points, pointCatalog]);
-  // ★ふりがな(ルビ)自体の文字と文字の間に置かれた記号。key = "rubyId:そのルビ文字列内の絶対オフセット"
+  // ★ふりがな(ルビ)自体の文字と文字の間に置かれた記号(「文字と文字の間」タイプのみ)。key = "rubyId:そのルビ文字列内の絶対オフセット(隙間)"
   const pointsByRubyOffset = useMemo(() => {
     const map = {};
-    (points || []).forEach((pt) => { if (!pt.rubyId) return; const k = pt.rubyId + ":" + pt.rubyOffset; (map[k] = map[k] || []).push(pt); });
+    (points || []).forEach((pt) => {
+      if (!pt.rubyId) return;
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (def && def.placement === "above") return;
+      const k = pt.rubyId + ":" + pt.rubyOffset;
+      (map[k] = map[k] || []).push(pt);
+    });
     return map;
-  }, [points]);
+  }, [points, pointCatalog]);
+  // ★ふりがなの特定の1文字の真上に置く記号。key = "rubyId:そのルビ文字列内の文字インデックス"
+  const abovePointsByRubyOffset = useMemo(() => {
+    const map = {};
+    (points || []).forEach((pt) => {
+      if (!pt.rubyId) return;
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (!def || def.placement !== "above") return;
+      const k = pt.rubyId + ":" + pt.rubyOffset;
+      (map[k] = map[k] || []).push(pt);
+    });
+    return map;
+  }, [points, pointCatalog]);
   function renderPointsAt(pos) {
     const list = pointsByPos[pos];
     if (!list || list.length === 0) return null;
@@ -585,6 +603,19 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       }, def.symbol);
     });
   }
+  // ★ふりがなの特定の1文字(rubyIdの文字列中のcharIdx番目)の真上に出す記号
+  function renderAboveRubySymbolsAt(rubyId, charIdx) {
+    const list = abovePointsByRubyOffset[rubyId + ":" + charIdx];
+    if (!list || list.length === 0) return null;
+    return list.map((pt) => {
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (!def) return null;
+      return E("span", {
+        key: pt.id, "data-annot-skip": "true", title: def.label,
+        style: { display: "inline-block", color: def.color, fontWeight: 700, margin: "0 1px" },
+      }, def.symbol);
+    });
+  }
   function hasAboveIn(s, e) {
     for (let p = s; p < e; p++) if (abovePointsByPos[p]) return true;
     return false;
@@ -605,6 +636,22 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       }, syms),
       baseNode,
     ]);
+  }
+  // ★ふりがなの[runStart, runEnd)の範囲を出力するが、途中に「文字の真上」記号が付いたかな文字があれば
+  // その1文字だけ withAboveSymbols で包んで真上に記号を重ねる。他の部分は従来通りのdata-ruby-id付きspan。
+  function buildRubyRun(rubyId, rubyStr, runStart, runEnd, keyPrefix) {
+    const out = [];
+    let cur = runStart;
+    for (let p = runStart; p < runEnd; p++) {
+      const syms = renderAboveRubySymbolsAt(rubyId, p);
+      if (!syms) continue;
+      if (p > cur) out.push(E("span", { key: keyPrefix + "pre" + p, "data-ruby-id": rubyId, "data-ruby-base-offset": String(cur) }, rubyStr.slice(cur, p)));
+      const charSpan = E("span", { key: "c", "data-ruby-id": rubyId, "data-ruby-base-offset": String(p) }, rubyStr.slice(p, p + 1));
+      out.push(withAboveSymbols(keyPrefix + "ab" + p, charSpan, syms, { lineHeight: 1.2, verticalAlign: "baseline" }));
+      cur = p + 1;
+    }
+    out.push(E("span", { key: keyPrefix + "post", "data-ruby-id": rubyId, "data-ruby-base-offset": String(cur) }, rubyStr.slice(cur, runEnd)));
+    return out;
   }
   const nodes = [E(React.Fragment, { key: "pt-0" }, renderPointsAt(0))];
   function segStyleAndTitleOf(seg) {
@@ -645,17 +692,21 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
         const { segStyle, title } = segStyleAndTitleOf(gseg);
         const segStart = boundaries[gi], segEnd = boundaries[gi + 1];
         const innerOffsets = Array.from(new Set(
-          (points || []).filter((pt) => pt.rubyId === seg.ruby.id && pt.rubyOffset > segStart && pt.rubyOffset < segEnd).map((pt) => pt.rubyOffset)
+          (points || []).filter((pt) => {
+            if (pt.rubyId !== seg.ruby.id || !(pt.rubyOffset > segStart && pt.rubyOffset < segEnd)) return false;
+            const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+            return !(def && def.placement === "above"); // above-typeはbuildRubyRunの方で1文字ずつ処理する
+          }).map((pt) => pt.rubyOffset)
         )).sort((a, b) => a - b);
         const rtChildren = [];
         let cursor = segStart;
         innerOffsets.forEach((o, oi) => {
-          rtChildren.push(E("span", { key: "t" + oi, "data-ruby-id": seg.ruby.id, "data-ruby-base-offset": String(cursor) }, rubyStr.slice(cursor, o)));
+          rtChildren.push.apply(rtChildren, buildRubyRun(seg.ruby.id, rubyStr, cursor, o, "r" + oi + "-"));
           const syms = renderRubyPointsAt(seg.ruby.id, o);
           if (syms) rtChildren.push(E(React.Fragment, { key: "s" + oi }, syms));
           cursor = o;
         });
-        rtChildren.push(E("span", { key: "tlast", "data-ruby-id": seg.ruby.id, "data-ruby-base-offset": String(cursor) }, rubyStr.slice(cursor, segEnd)));
+        rtChildren.push.apply(rtChildren, buildRubyRun(seg.ruby.id, rubyStr, cursor, segEnd, "rlast-"));
         const isLastInGroup = gi === group.length - 1;
         const midSymbols = !isLastInGroup ? renderPointsAt(gseg.end) : null; // ルビの内側(文字と文字の区切り)にある記号→ふりがな行へ
         rtChildren.push(midSymbols ? E("span", { key: "sym", "data-annot-skip": "true", style: { margin: "0 1px" } }, midSymbols) : null);
@@ -1353,11 +1404,20 @@ function LyricsArchive() {
         const sel = window.getSelection();
         if (sel && !sel.isCollapsed) return; // ドラッグで範囲選択された場合はスタンプを置かない
         if (clientX == null || clientY == null) return;
-        // ★Phase6: 「文字の真上」の記号はふりがな(ルビ)自体の中には置けない(ふりがなの上に重ねて出す設計のため)。
-        // ふりがな部分をタップした場合は無視し、本文の文字をタップしたときだけ配置する。
-        if (!isAbove) {
-          const rubyTarget = getRubyClickTarget(annotateRef.current, clientX, clientY);
-          if (rubyTarget) { placeRubyStamp(rubyTarget.rubyId, rubyTarget.rubyOffset, stampType); return; }
+        // ★ふりがな部分をタップした場合: 「文字と文字の間」タイプは従来通りその隙間に、
+        // 「文字の真上」タイプはそのかな1文字の真上に配置する。
+        const rubyTarget = getRubyClickTarget(annotateRef.current, clientX, clientY);
+        if (rubyTarget) {
+          if (isAbove) {
+            const ruby = draftRubies.find((r) => r.id === rubyTarget.rubyId);
+            const rubyLen = ruby ? (ruby.text || "").length : 0;
+            if (rubyLen === 0) return;
+            const charIdx = Math.min(rubyTarget.rubyOffset, rubyLen - 1); // ギャップ位置→かな文字位置
+            placeRubyStamp(rubyTarget.rubyId, charIdx, stampType);
+          } else {
+            placeRubyStamp(rubyTarget.rubyId, rubyTarget.rubyOffset, stampType);
+          }
+          return;
         }
         const pos = getClickOffset(annotateRef.current, clientX, clientY);
         if (pos == null) return;
