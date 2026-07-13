@@ -66,13 +66,14 @@ const DEFAULT_MARK_CATALOG = [
   { id: "weak", label: "弱く歌う", color: "#5B9BD5" },
 ];
 // point型(文字と文字の間に記号を挿入する): ブレス、ロングトーン、上げ下げなど
+// ★Phase6: placement: "between"(文字と文字の間/従来通り) | "above"(文字の真上。ルビがあればその上にも重ねて表示)
 const DEFAULT_POINT_CATALOG = [
-  { id: "breath", label: "ブレス", symbol: "V", color: "#3A8F5A" },
-  { id: "rise", label: "上がる", symbol: "↗", color: "#3C7FD6" },
-  { id: "fall", label: "下がる", symbol: "↘", color: "#3C7FD6" },
-  { id: "sustain", label: "ロングトーン(伸ばす)", symbol: "〜→", color: "#D68A3C" },
-  { id: "vibrato", label: "ビブラート", symbol: "〜", color: "#8E7CC3" },
-  { id: "cut", label: "音を切る", symbol: "×", color: "#7A7A7A" },
+  { id: "breath", label: "ブレス", symbol: "V", color: "#3A8F5A", placement: "between" },
+  { id: "rise", label: "上がる", symbol: "↗", color: "#3C7FD6", placement: "between" },
+  { id: "fall", label: "下がる", symbol: "↘", color: "#3C7FD6", placement: "between" },
+  { id: "sustain", label: "ロングトーン(伸ばす)", symbol: "〜→", color: "#D68A3C", placement: "between" },
+  { id: "vibrato", label: "ビブラート", symbol: "〜", color: "#8E7CC3", placement: "between" },
+  { id: "cut", label: "音を切る", symbol: "×", color: "#7A7A7A", placement: "between" },
 ];
 const DEFAULT_REACTION_TYPES = [
   { id: "thumbsup", emoji: "👍", label: "参考になった" },
@@ -517,12 +518,30 @@ function PinInput(value, onChange) {
 
 function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markCatalog, pointCatalog, interactive, containerRef, onMouseUp, onTouchEnd }) {
   const segments = useMemo(() => buildSegments(text || "", parts, marks, points, rubies), [text, parts, marks, points, rubies]);
-  // ★ルビの外(通常の文字間)に置かれた記号のみ対象。ルビ内部(rubyIdあり)の記号は別枠(pointsByRubyOffset)で扱う。
+  // ★ルビの外(通常の文字間)に置かれた記号のうち、配置が「文字と文字の間」のものだけを対象。
+  // 「文字の真上」の記号はabovePointsByPosで別枠管理し、ルビ内部(rubyIdあり)の記号はpointsByRubyOffsetで扱う。
   const pointsByPos = useMemo(() => {
     const map = {};
-    (points || []).forEach((pt) => { if (pt.rubyId) return; (map[pt.position] = map[pt.position] || []).push(pt); });
+    (points || []).forEach((pt) => {
+      if (pt.rubyId) return;
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (def && def.placement === "above") return;
+      (map[pt.position] = map[pt.position] || []).push(pt);
+    });
     return map;
-  }, [points]);
+  }, [points, pointCatalog]);
+  // ★Phase6: 文字の真上に配置する記号(記号カタログでplacement:"above"を指定したもの)。
+  // positionはその文字自身の開始オフセット(=text[position]の文字の真上に出す)。
+  const abovePointsByPos = useMemo(() => {
+    const map = {};
+    (points || []).forEach((pt) => {
+      if (pt.rubyId) return;
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (!def || def.placement !== "above") return;
+      (map[pt.position] = map[pt.position] || []).push(pt);
+    });
+    return map;
+  }, [points, pointCatalog]);
   // ★ふりがな(ルビ)自体の文字と文字の間に置かれた記号。key = "rubyId:そのルビ文字列内の絶対オフセット"
   const pointsByRubyOffset = useMemo(() => {
     const map = {};
@@ -553,6 +572,23 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       }, def.symbol);
     });
   }
+  // ★Phase6: 指定した1文字(pos = text[pos])の真上に出す記号ノード(rtの中身)を作る
+  function renderAboveSymbolsAt(pos) {
+    const list = abovePointsByPos[pos];
+    if (!list || list.length === 0) return null;
+    return list.map((pt) => {
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (!def) return null;
+      return E("span", {
+        key: pt.id, "data-annot-skip": "true", title: def.label,
+        style: { display: "inline-block", color: def.color, fontWeight: 700, margin: "0 1px" },
+      }, def.symbol);
+    });
+  }
+  function hasAboveIn(s, e) {
+    for (let p = s; p < e; p++) if (abovePointsByPos[p]) return true;
+    return false;
+  }
   const nodes = [E(React.Fragment, { key: "pt-0" }, renderPointsAt(0))];
   function segStyleAndTitleOf(seg) {
     const partDef = seg.part ? (partCatalog || []).find((p) => p.id === seg.part.colorId) : null;
@@ -574,6 +610,8 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
   // その場合は本文側は分割せず(1文字のまま)、ふりがな側だけを内部で区切って記号を挟み込む。
   // 各ふりがな断片には data-ruby-id / data-ruby-base-offset を付与し、クリック位置→ルビ内オフセットの
   // 逆算(getRubyClickTarget)に使えるようにしている。
+  // ★Phase6: 「文字の真上」記号は入れ子のrubyで実現する。ルビ(ふりがな)が付いている文字にかぶった場合は
+  // 外側rubyのrtに記号、内側rubyのrtにふりがな、という二段重ねになり、結果的に「ふりがなの、さらに上」に記号が出る。
   let i = 0;
   while (i < segments.length) {
     const seg = segments[i];
@@ -604,17 +642,46 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
         const isLastInGroup = gi === group.length - 1;
         const midSymbols = !isLastInGroup ? renderPointsAt(gseg.end) : null; // ルビの内側(文字と文字の区切り)にある記号→ふりがな行へ
         rtChildren.push(midSymbols ? E("span", { key: "sym", "data-annot-skip": "true", style: { margin: "0 1px" } }, midSymbols) : null);
-        nodes.push(E("ruby", { key: `seg-${i}-${gi}` }, [
+        const rubyChildren = [
           E("span", { key: "base", style: segStyle, title }, gseg.text),
           E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, fontWeight: 500, color: "#8A6D3C", userSelect: "none" } }, rtChildren),
-        ]));
+        ];
+        // ★Phase6: このgsegの範囲内に「文字の真上」記号があれば、ふりがなのさらに上に二段目のrtとして重ねる(入れ子ruby)
+        if (hasAboveIn(gseg.start, gseg.end)) {
+          const aboveSyms = [];
+          for (let p = gseg.start; p < gseg.end; p++) { const s = renderAboveSymbolsAt(p); if (s) aboveSyms.push.apply(aboveSyms, s); }
+          nodes.push(E("ruby", { key: `seg-${i}-${gi}` }, [
+            E("ruby", { key: "inner" }, rubyChildren),
+            E("rt", { key: "ort", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 9, lineHeight: 1, userSelect: "none" } }, aboveSyms),
+          ]));
+        } else {
+          nodes.push(E("ruby", { key: `seg-${i}-${gi}` }, rubyChildren));
+        }
       });
       const lastEnd = group[group.length - 1].end;
       nodes.push(E(React.Fragment, { key: "pt-" + lastEnd }, renderPointsAt(lastEnd))); // ルビ全体の外側との境目の記号は従来通り本文行
       i = j;
     } else {
       const { segStyle, title } = segStyleAndTitleOf(seg);
-      nodes.push(E("span", { key: "seg-" + i, title, style: segStyle }, seg.text));
+      if (!hasAboveIn(seg.start, seg.end)) {
+        nodes.push(E("span", { key: "seg-" + i, title, style: segStyle }, seg.text));
+      } else {
+        // ★Phase6: 区間内に「文字の真上」記号があるので、対象の文字だけrubyで包んで真上に記号を出す(ふりがなが無い文字の場合)
+        const runs = [];
+        let cursor = seg.start;
+        for (let p = seg.start; p < seg.end; p++) {
+          if (!abovePointsByPos[p]) continue;
+          if (p > cursor) runs.push(E("span", { key: "pre" + p, title, style: segStyle }, text.slice(cursor, p)));
+          const syms = renderAboveSymbolsAt(p);
+          runs.push(E("ruby", { key: "ab" + p }, [
+            E("span", { key: "b", title, style: segStyle }, text.slice(p, p + 1)),
+            E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, lineHeight: 1, userSelect: "none" } }, syms),
+          ]));
+          cursor = p + 1;
+        }
+        if (cursor < seg.end) runs.push(E("span", { key: "post", title, style: segStyle }, text.slice(cursor, seg.end)));
+        nodes.push(E(React.Fragment, { key: "seg-" + i }, runs));
+      }
       nodes.push(E(React.Fragment, { key: "pt-" + seg.end }, renderPointsAt(seg.end)));
       i++;
     }
@@ -660,8 +727,11 @@ function Legend({ parts, marks, points, partCatalog, markCatalog, pointCatalog }
       usedPointIds.map((id) => {
         const pt = (pointCatalog || []).find((pc) => pc.id === id);
         if (!pt) return null;
-        return E("span", { key: id, style: { display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_M, fontSize: 11, color: "#5A5138" } },
-          E("span", { style: { color: pt.color, fontWeight: 700 } }, pt.symbol), pt.label);
+        return E("span", { key: id, style: { display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_M, fontSize: 11, color: "#5A5138" } }, [
+          E("span", { key: "s", style: { color: pt.color, fontWeight: 700 } }, pt.symbol),
+          pt.label,
+          pt.placement === "above" && E("span", { key: "abv", title: "文字の真上に配置", style: { fontSize: 9, color: C.brassDim } }, "▲上"),
+        ]);
       })
     )
   );
@@ -763,25 +833,33 @@ function ShareLockedCard({ song, onSubmit, error, busy }) {
   ]);
 }
 
-function CatalogModal({ title, items, hasSymbol, onClose, onAdd, onUpdate, onDelete, onReset }) {
+function CatalogModal({ title, items, hasSymbol, hasPlacement, onClose, onAdd, onUpdate, onDelete, onReset }) {
   return E("div", { style: { position: "fixed", inset: 0, zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 16px", background: "rgba(0,0,0,0.55)" } },
     E("div", { style: { background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 6, padding: "20px 22px", width: 420, maxHeight: "80vh", overflowY: "auto" } }, [
       E("div", { key: "h", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 } },
         E("span", { style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, title),
         E("button", { onClick: onClose, style: { background: "none", border: "none", cursor: "pointer", color: C.paperTextDim, fontSize: 16 } }, "×")),
-      E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } }, items.map((it) =>
-        E("div", { key: it.id, style: { display: "flex", alignItems: "center", gap: 8, background: C.ink, border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "6px 8px" } }, [
-          E("input", { key: "c", type: "color", value: it.color, onChange: (ev) => onUpdate(it.id, { color: ev.target.value }), style: { width: 28, height: 28, border: "none", background: "none", cursor: "pointer", padding: 0 } }),
-          hasSymbol && E("input", { key: "s", value: it.symbol || "", onChange: (ev) => onUpdate(it.id, { symbol: ev.target.value.slice(0, 4) }), style: { width: 44, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_M, fontSize: 12, padding: "4px 6px", textAlign: "center" } }),
-          E("input", { key: "l", value: it.label, onChange: (ev) => onUpdate(it.id, { label: ev.target.value }), style: { flex: 1, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_B, fontSize: 13, padding: "5px 8px" } }),
-          E("button", { key: "d", onClick: () => onDelete(it.id), title: "削除", style: { background: "none", border: "none", cursor: "pointer", color: C.waxDim } }, "✕"),
-        ])
-      )),
+      E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } }, items.map((it) => {
+        const placement = it.placement === "above" ? "above" : "between"; // ★Phase6: 未指定は従来通り「文字と文字の間」扱い
+        return E("div", { key: it.id, style: { display: "flex", flexDirection: "column", gap: 6, background: C.ink, border: `1px solid ${C.inkBorder}`, borderRadius: 4, padding: "6px 8px" } }, [
+          E("div", { key: "row1", style: { display: "flex", alignItems: "center", gap: 8 } }, [
+            E("input", { key: "c", type: "color", value: it.color, onChange: (ev) => onUpdate(it.id, { color: ev.target.value }), style: { width: 28, height: 28, border: "none", background: "none", cursor: "pointer", padding: 0 } }),
+            hasSymbol && E("input", { key: "s", value: it.symbol || "", onChange: (ev) => onUpdate(it.id, { symbol: ev.target.value.slice(0, 4) }), style: { width: 44, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_M, fontSize: 12, padding: "4px 6px", textAlign: "center" } }),
+            E("input", { key: "l", value: it.label, onChange: (ev) => onUpdate(it.id, { label: ev.target.value }), style: { flex: 1, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_B, fontSize: 13, padding: "5px 8px" } }),
+            E("button", { key: "d", onClick: () => onDelete(it.id), title: "削除", style: { background: "none", border: "none", cursor: "pointer", color: C.waxDim } }, "✕"),
+          ]),
+          hasPlacement && E("div", { key: "row2", style: { display: "flex", alignItems: "center", gap: 6, paddingLeft: 36 } }, [
+            E("span", { key: "lbl", style: { fontSize: 10, color: C.paperTextDim, fontFamily: FONT_M } }, "配置:"),
+            E("button", { key: "btw", onClick: () => { if (placement !== "between" && !confirm("配置を「文字と文字の間」に変更しますか?\nすでにこの記号を使っている歌詞があると、表示位置がずれる場合があります。")) return; onUpdate(it.id, { placement: "between" }); }, style: { fontSize: 10, padding: "2px 8px", borderRadius: 10, cursor: "pointer", fontFamily: FONT_M, background: placement === "between" ? C.brass : "transparent", color: placement === "between" ? C.ink : C.paperTextDim, border: `1px solid ${placement === "between" ? C.brass : C.inkBorder}` } }, "文字と文字の間"),
+            E("button", { key: "abv", onClick: () => { if (placement !== "above" && !confirm("配置を「文字の真上」に変更しますか?\nすでにこの記号を使っている歌詞があると、表示位置がずれる場合があります。")) return; onUpdate(it.id, { placement: "above" }); }, style: { fontSize: 10, padding: "2px 8px", borderRadius: 10, cursor: "pointer", fontFamily: FONT_M, background: placement === "above" ? C.brass : "transparent", color: placement === "above" ? C.ink : C.paperTextDim, border: `1px solid ${placement === "above" ? C.brass : C.inkBorder}` } }, "文字の真上(ルビの上にも表示)"),
+          ]),
+        ]);
+      })),
       E("div", { key: "row2", style: { display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" } }, [
         E("button", { key: "add", onClick: onAdd, style: { display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px dashed ${C.brassDim}`, borderRadius: 4, padding: "7px 10px", color: C.brass, fontSize: 12, cursor: "pointer", fontFamily: FONT_M } }, "＋ 追加する"),
         onReset && E("button", { key: "reset", onClick: onReset, style: { display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px dashed ${C.inkBorder}`, borderRadius: 4, padding: "7px 10px", color: C.paperTextDim, fontSize: 12, cursor: "pointer", fontFamily: FONT_M } }, "⟲ 初期値に戻す"),
       ]),
-      E("div", { key: "note", style: { fontSize: 11, color: C.paperTextDim, marginTop: 12, fontFamily: FONT_B, lineHeight: 1.6 } }, "ここでの変更は共有データとして全員に反映されます。色や記号、ラベルはあとから自由に変更できます。"),
+      E("div", { key: "note", style: { fontSize: 11, color: C.paperTextDim, marginTop: 12, fontFamily: FONT_B, lineHeight: 1.6 } }, hasPlacement ? "ここでの変更は共有データとして全員に反映されます。「文字の真上」にするとスタンプ時にルビ(ふりがな)があればその上に重ねて表示されます。" : "ここでの変更は共有データとして全員に反映されます。色や記号、ラベルはあとから自由に変更できます。"),
     ])
   );
 }
@@ -1255,14 +1333,28 @@ function LyricsArchive() {
     if (stampType) {
       const clientX = ev.clientX != null ? ev.clientX : (ev.changedTouches && ev.changedTouches[0] && ev.changedTouches[0].clientX);
       const clientY = ev.clientY != null ? ev.clientY : (ev.changedTouches && ev.changedTouches[0] && ev.changedTouches[0].clientY);
+      const stampDef = (pointCatalog || []).find((pc) => pc.id === stampType);
+      const isAbove = !!(stampDef && stampDef.placement === "above"); // ★Phase6
       setTimeout(() => {
         const sel = window.getSelection();
         if (sel && !sel.isCollapsed) return; // ドラッグで範囲選択された場合はスタンプを置かない
         if (clientX == null || clientY == null) return;
-        const rubyTarget = getRubyClickTarget(annotateRef.current, clientX, clientY);
-        if (rubyTarget) { placeRubyStamp(rubyTarget.rubyId, rubyTarget.rubyOffset, stampType); return; }
+        // ★Phase6: 「文字の真上」の記号はふりがな(ルビ)自体の中には置けない(ふりがなの上に重ねて出す設計のため)。
+        // ふりがな部分をタップした場合は無視し、本文の文字をタップしたときだけ配置する。
+        if (!isAbove) {
+          const rubyTarget = getRubyClickTarget(annotateRef.current, clientX, clientY);
+          if (rubyTarget) { placeRubyStamp(rubyTarget.rubyId, rubyTarget.rubyOffset, stampType); return; }
+        }
         const pos = getClickOffset(annotateRef.current, clientX, clientY);
-        if (pos != null) placeStamp(pos, stampType);
+        if (pos == null) return;
+        if (isAbove) {
+          const text = selectedSong ? selectedSong.lyrics || "" : "";
+          if (text.length === 0) return;
+          const charIndex = Math.min(pos, text.length - 1); // ギャップ位置→文字位置(その文字の真上に置く)
+          placeStamp(charIndex, stampType);
+        } else {
+          placeStamp(pos, stampType);
+        }
       }, 0);
     }
   }
@@ -1411,7 +1503,7 @@ function LyricsArchive() {
   function addCatalogItem(kind) {
     const [list, setList, key] = catalogStateFor(kind);
     const item = kind === "point"
-      ? { id: newId(), label: "新しい記号", symbol: "?", color: "#888888" }
+      ? { id: newId(), label: "新しい記号", symbol: "?", color: "#888888", placement: "between" }
       : { id: newId(), label: kind === "part" ? "新しいパート" : "新しいマーカー", color: "#888888" };
     const next = list.concat([item]);
     setList(next);
@@ -1721,7 +1813,7 @@ function LyricsArchive() {
     shareModal && selectedSong && E(ShareModal, { key: "share", song: selectedSong, canEdit: canEditSong(selectedSong), onClose: () => setShareModal(false), onSave: saveShareSettings, saving: shareSaving, saveMsg: shareSaveMsg }),
     catalogModal === "part" && E(CatalogModal, { key: "catp", title: "パート色を管理", items: partCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("part"), onUpdate: (id, patch) => updateCatalogItem("part", id, patch), onDelete: (id) => deleteCatalogItem("part", id), onReset: () => resetCatalogToDefault("part") }),
     catalogModal === "mark" && E(CatalogModal, { key: "catm", title: "マーカー(ハイライト)を管理", items: markCatalog, hasSymbol: false, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("mark"), onUpdate: (id, patch) => updateCatalogItem("mark", id, patch), onDelete: (id) => deleteCatalogItem("mark", id), onReset: () => resetCatalogToDefault("mark") }),
-    catalogModal === "point" && E(CatalogModal, { key: "catpt", title: "記号(ブレス・ロングトーン等)を管理", items: pointCatalog, hasSymbol: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("point"), onUpdate: (id, patch) => updateCatalogItem("point", id, patch), onDelete: (id) => deleteCatalogItem("point", id), onReset: () => resetCatalogToDefault("point") }),
+    catalogModal === "point" && E(CatalogModal, { key: "catpt", title: "記号(ブレス・ロングトーン等)を管理", items: pointCatalog, hasSymbol: true, hasPlacement: true, onClose: () => setCatalogModal(null), onAdd: () => addCatalogItem("point"), onUpdate: (id, patch) => updateCatalogItem("point", id, patch), onDelete: (id) => deleteCatalogItem("point", id), onReset: () => resetCatalogToDefault("point") }),
   ]);
 }
 
