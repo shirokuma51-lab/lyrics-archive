@@ -689,7 +689,7 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
           if (p > cursor) runs.push(E("span", { key: "pre" + p, title, style: segStyle }, text.slice(cursor, p)));
           const syms = renderAboveSymbolsAt(p);
           const charNode = E("span", { key: "b", title, style: segStyle }, text.slice(p, p + 1));
-          runs.push(withAboveSymbols("ab" + p, charNode, syms, { lineHeight: 1.2, verticalAlign: "bottom" }));
+          runs.push(withAboveSymbols("ab" + p, charNode, syms, { lineHeight: 1.2, verticalAlign: "baseline" }));
           cursor = p + 1;
         }
         if (cursor < seg.end) runs.push(E("span", { key: "post", title, style: segStyle }, text.slice(cursor, seg.end)));
