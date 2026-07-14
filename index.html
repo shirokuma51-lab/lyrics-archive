@@ -1093,6 +1093,12 @@ function LyricsArchive() {
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [nicknameSaving, setNicknameSaving] = useState(false);
   const [nicknameMsg, setNicknameMsg] = useState("");
+  // ★Phase8: ショートカット設定(PC限定)。users/{uid}.shortcuts = { "ctrl+1": "記号カタログのid", ... }
+  const [shortcuts, setShortcuts] = useState({});
+  const [shortcutsDraft, setShortcutsDraft] = useState({});
+  const [shortcutsSaving, setShortcutsSaving] = useState(false);
+  const [shortcutsMsg, setShortcutsMsg] = useState("");
+  const SHORTCUT_SLOTS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]; // Ctrl+1〜Ctrl+9
 
   useEffect(() => {
     const onResize = () => { setIsMobile(window.innerWidth < 768); setIsWideScreen(window.innerWidth >= 1100); };
@@ -1128,6 +1134,9 @@ function LyricsArchive() {
       const profile = await getUserProfile(fbUser.uid);
       const nick = (profile && profile.nickname) ? profile.nickname : "";
       setNickname(nick);
+      const sc = (profile && profile.shortcuts) || {}; // ★Phase8
+      setShortcuts(sc);
+      setShortcutsDraft(sc);
       setUser({ id: fbUser.uid, googleName, name: nick || googleName, photoURL: fbUser.photoURL || null });
       setAuthLoading(false);
     });
@@ -1142,6 +1151,7 @@ function LyricsArchive() {
     fbAuth.signOut();
     if (mode === "mypage") setMode(selectedSong ? "view" : "empty");
     setNicknameDraft(""); setNicknameMsg("");
+    setShortcuts({}); setShortcutsDraft({}); setShortcutsMsg(""); // ★Phase8
   }
 
   // ★Phase4: ニックネーム保存。空文字保存=ニックネーム未設定に戻す(Google表示名を使用)。
@@ -1159,6 +1169,22 @@ function LyricsArchive() {
       setNicknameMsg("⚠ 保存に失敗しました: " + e.message);
     }
     setNicknameSaving(false);
+  }
+  // ★Phase8: ショートカット設定の保存。空(未設定)の枠は保存データから取り除く。
+  async function saveShortcuts() {
+    if (!user) return;
+    setShortcutsSaving(true); setShortcutsMsg("");
+    try {
+      const cleaned = {};
+      Object.keys(shortcutsDraft).forEach((k) => { if (shortcutsDraft[k]) cleaned[k] = shortcutsDraft[k]; });
+      await setUserProfile(user.id, { shortcuts: cleaned });
+      setShortcuts(cleaned);
+      setShortcutsDraft(cleaned);
+      setShortcutsMsg("✅ ショートカットを保存しました。");
+    } catch (e) {
+      setShortcutsMsg("⚠ 保存に失敗しました: " + e.message);
+    }
+    setShortcutsSaving(false);
   }
 
   async function runMigration() {
@@ -1498,11 +1524,22 @@ function LyricsArchive() {
         if (tag === "INPUT" || tag === "TEXTAREA") return;
         ev.preventDefault();
         undoAnnotation();
+        return;
+      }
+      // ★Phase8: Ctrl(または⌘)+数字キーで、設定した記号スタンプを即座に選択する(PC限定・物理キーボード操作のため)
+      if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && !ev.altKey && SHORTCUT_SLOTS.indexOf(ev.key) !== -1) {
+        const tag = ev.target && ev.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        const typeId = shortcuts["ctrl+" + ev.key];
+        if (typeId && (pointCatalog || []).some((pc) => pc.id === typeId)) {
+          ev.preventDefault();
+          armStampType(typeId);
+        }
       }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [mode, undoStack, draftParts, draftMarks, draftPoints, draftRubies]);
+  }, [mode, undoStack, draftParts, draftMarks, draftPoints, draftRubies, shortcuts, pointCatalog]);
   function applyMark(typeId) {
     if (!selRange) return;
     pushUndoSnapshot();
@@ -1735,6 +1772,29 @@ function LyricsArchive() {
           E("button", { key: "save", onClick: saveNickname, disabled: nicknameSaving, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 4, padding: "0 16px", fontSize: 12, fontWeight: 600, cursor: nicknameSaving ? "default" : "pointer", opacity: nicknameSaving ? 0.6 : 1 } }, nicknameSaving ? "保存中..." : "保存"),
         ]),
         nicknameMsg && E("div", { key: "msg", style: { fontFamily: FONT_M, fontSize: 11, color: C.brassDim, marginTop: 8 } }, nicknameMsg),
+      ]),
+      // ★Phase8: ショートカット設定(PC限定)
+      E("div", { key: "shortcut-set", style: { background: C.paper, border: `1px solid ${C.paperLine}`, borderRadius: 4, padding: "16px 18px", marginBottom: 20 } }, [
+        E("div", { key: "lbl", style: { fontFamily: FONT_D, color: C.inkText, fontSize: 14, marginBottom: 8 } }, "⌨️ ショートカット設定(PC限定)"),
+        E("div", { key: "help", style: { fontFamily: FONT_M, color: "#8A8060", fontSize: 11, marginBottom: 10, lineHeight: 1.6 } }, "歌詞編集画面で、Ctrl(Macは⌘)+数字キーを押すと、ここで割り当てた記号スタンプをすぐに選択できます。物理キーボードでの操作なので、スマホ・タブレットでは使えません。"),
+        E("div", { key: "rows", style: { display: "flex", flexDirection: "column", gap: 6 } }, SHORTCUT_SLOTS.map((digit) => {
+          const key = "ctrl+" + digit;
+          return E("div", { key, style: { display: "flex", alignItems: "center", gap: 8 } }, [
+            E("span", { key: "k", style: { fontFamily: FONT_M, fontSize: 12, color: "#5A5138", width: 76, flexShrink: 0 } }, `Ctrl+${digit}`),
+            E("select", {
+              key: "sel", value: shortcutsDraft[key] || "",
+              onChange: (ev) => setShortcutsDraft((prev) => Object.assign({}, prev, { [key]: ev.target.value })),
+              style: Object.assign({}, inputStyle, { flex: 1, padding: "6px 8px" }),
+            }, [
+              E("option", { key: "none", value: "" }, "(未設定)"),
+              ...pointCatalog.map((pc) => E("option", { key: pc.id, value: pc.id }, `${pc.symbol || ""} ${pc.label}`)),
+            ]),
+          ]);
+        })),
+        E("div", { key: "act", style: { marginTop: 10 } },
+          E("button", { onClick: saveShortcuts, disabled: shortcutsSaving, style: { background: C.brass, color: C.ink, border: "none", borderRadius: 4, padding: "7px 16px", fontSize: 12, fontWeight: 600, cursor: shortcutsSaving ? "default" : "pointer", opacity: shortcutsSaving ? 0.6 : 1 } }, shortcutsSaving ? "保存中..." : "保存")
+        ),
+        shortcutsMsg && E("div", { key: "msg", style: { fontFamily: FONT_M, fontSize: 11, color: C.brassDim, marginTop: 8 } }, shortcutsMsg),
       ]),
       E("div", { key: "stat", style: { color: C.paperTextDim, fontSize: 12, marginBottom: 16, fontFamily: FONT_M } }, `${user ? user.name : ""} さんが登録した歌詞: ${mySongs.length}曲 ・ 累計リアクション: ${mySongs.reduce((a, s) => a + (s.reactionTotal || 0), 0)}`),
       E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } },
