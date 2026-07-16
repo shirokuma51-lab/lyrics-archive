@@ -66,7 +66,7 @@ const DEFAULT_MARK_CATALOG = [
   { id: "weak", label: "弱く歌う", color: "#5B9BD5" },
 ];
 // point型(文字と文字の間に記号を挿入する): ブレス、ロングトーン、上げ下げなど
-// ★Phase6: placement: "between"(文字と文字の間/従来通り) | "above"(文字の真上。ルビがあればその上にも重ねて表示)
+// placement: "between"(文字と文字の間/従来通り) | "above"(★Phase6: 文字の真上。ルビがあればその上にも重ねて表示) | "after"(★Phase9: 文字の後ろに表示)
 const DEFAULT_POINT_CATALOG = [
   { id: "breath", label: "ブレス", symbol: "V", color: "#3A8F5A", placement: "between" },
   { id: "rise", label: "上がる", symbol: "↗", color: "#3C7FD6", placement: "between" },
@@ -75,6 +75,40 @@ const DEFAULT_POINT_CATALOG = [
   { id: "vibrato", label: "ビブラート", symbol: "〜", color: "#8E7CC3", placement: "between" },
   { id: "cut", label: "音を切る", symbol: "×", color: "#7A7A7A", placement: "between" },
 ];
+// ★Phase9: 母音記号。既存のポイントカタログ(Firestoreに保存済み)には無いので、読み込み時に無ければ追加する(ensurePointCatalogDefaults)。
+const PHASE9_VOWEL_DEFAULTS = [
+  { id: "vowel_a", label: "母音(あ)", symbol: "あ", color: "#D62828", placement: "after" },
+  { id: "vowel_i", label: "母音(い)", symbol: "い", color: "#D62828", placement: "after" },
+  { id: "vowel_u", label: "母音(う)", symbol: "う", color: "#D62828", placement: "after" },
+  { id: "vowel_e", label: "母音(え)", symbol: "え", color: "#D62828", placement: "after" },
+  { id: "vowel_o", label: "母音(お)", symbol: "お", color: "#D62828", placement: "after" },
+];
+// ★Phase10: 子音記号。かな1文字から子音(K/S/T/N/H/M/Y/R/W)を自動判定して表示する特殊な記号タイプ。
+// 対象外の文字(母音のみのあ行や、濁音/半濁音など)はconsonantOf()がnullを返す→スタンプ不可・表示なしとする。
+const CONSONANT_MAP = {
+  "か": "K", "き": "K", "く": "K", "け": "K", "こ": "K", "カ": "K", "キ": "K", "ク": "K", "ケ": "K", "コ": "K",
+  "さ": "S", "し": "S", "す": "S", "せ": "S", "そ": "S", "サ": "S", "シ": "S", "ス": "S", "セ": "S", "ソ": "S",
+  "た": "T", "ち": "T", "つ": "T", "て": "T", "と": "T", "タ": "T", "チ": "T", "ツ": "T", "テ": "T", "ト": "T",
+  "な": "N", "に": "N", "ぬ": "N", "ね": "N", "の": "N", "ん": "N", "ナ": "N", "ニ": "N", "ヌ": "N", "ネ": "N", "ノ": "N", "ン": "N",
+  "は": "H", "ひ": "H", "ふ": "H", "へ": "H", "ほ": "H", "ハ": "H", "ヒ": "H", "フ": "H", "ヘ": "H", "ホ": "H",
+  "ま": "M", "み": "M", "む": "M", "め": "M", "も": "M", "マ": "M", "ミ": "M", "ム": "M", "メ": "M", "モ": "M",
+  "や": "Y", "ゆ": "Y", "よ": "Y", "ゃ": "Y", "ゅ": "Y", "ょ": "Y", "ヤ": "Y", "ユ": "Y", "ヨ": "Y", "ャ": "Y", "ュ": "Y", "ョ": "Y",
+  "ら": "R", "り": "R", "る": "R", "れ": "R", "ろ": "R", "ラ": "R", "リ": "R", "ル": "R", "レ": "R", "ロ": "R",
+  "わ": "W", "を": "W", "ワ": "W", "ヲ": "W",
+};
+function consonantOf(ch) { return CONSONANT_MAP[ch] || null; }
+// ★Phase10: 記号の表示文字を決める共通ヘルパー。自動判定タイプは対象の文字から子音を割り出し、それ以外はカタログのsymbolをそのまま使う。
+function displaySymbolFor(def, ch) { return def && def.autoConsonant ? consonantOf(ch) : (def ? def.symbol : null); }
+const PHASE10_CONSONANT_DEFAULTS = [
+  { id: "consonant_auto", label: "子音(自動判定)", symbol: "子", color: "#2A4D8F", placement: "above", autoConsonant: true },
+];
+// ★Phase9/10: 追加された初期記号を、既存の共有カタログに(ユーザーのカスタマイズを壊さず)追記するための移行処理
+function ensurePointCatalogDefaults(items) {
+  const allDefaults = PHASE9_VOWEL_DEFAULTS.concat(PHASE10_CONSONANT_DEFAULTS);
+  const existingIds = new Set((items || []).map((it) => it.id));
+  const missing = allDefaults.filter((d) => !existingIds.has(d.id));
+  return missing.length === 0 ? items : (items || []).concat(missing);
+}
 const DEFAULT_REACTION_TYPES = [
   { id: "thumbsup", emoji: "👍", label: "参考になった" },
   { id: "mic", emoji: "🎤", label: "歌いやすかった" },
@@ -134,6 +168,14 @@ async function loadCatalog(key, defaults) {
 }
 async function saveCatalog(key, items) {
   try { await db.collection("catalogs").doc(key).set({ items }); } catch (e) {}
+}
+// ★Phase9: point-catalog専用のロード処理。既存データには母音の初期記号が無いので、
+// 読み込んだ後に不足分だけ追記し、変わっていればFirestoreにも書き戻す(ユーザーのカスタマイズは維持)。
+async function loadPointCatalogWithMigration() {
+  const loaded = await loadCatalog("point-catalog", DEFAULT_POINT_CATALOG.concat(PHASE9_VOWEL_DEFAULTS, PHASE10_CONSONANT_DEFAULTS));
+  const migrated = ensurePointCatalogDefaults(loaded);
+  if (migrated !== loaded) { await saveCatalog("point-catalog", migrated); }
+  return migrated;
 }
 async function getReactions(songId) {
   try {
@@ -519,13 +561,13 @@ function PinInput(value, onChange) {
 function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markCatalog, pointCatalog, interactive, containerRef, onMouseUp, onTouchEnd }) {
   const segments = useMemo(() => buildSegments(text || "", parts, marks, points, rubies), [text, parts, marks, points, rubies]);
   // ★ルビの外(通常の文字間)に置かれた記号のうち、配置が「文字と文字の間」のものだけを対象。
-  // 「文字の真上」の記号はabovePointsByPosで別枠管理し、ルビ内部(rubyIdあり)の記号はpointsByRubyOffsetで扱う。
+  // 「文字の真上」はabovePointsByPos、「文字の後ろ」はafterPointsByPosで別枠管理し、ルビ内部(rubyIdあり)の記号はpointsByRubyOffsetで扱う。
   const pointsByPos = useMemo(() => {
     const map = {};
     (points || []).forEach((pt) => {
       if (pt.rubyId) return;
       const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
-      if (def && def.placement === "above") return;
+      if (def && (def.placement === "above" || def.placement === "after")) return;
       (map[pt.position] = map[pt.position] || []).push(pt);
     });
     return map;
@@ -538,6 +580,18 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       if (pt.rubyId) return;
       const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
       if (!def || def.placement !== "above") return;
+      (map[pt.position] = map[pt.position] || []).push(pt);
+    });
+    return map;
+  }, [points, pointCatalog]);
+  // ★Phase9: 文字の後ろに表示する記号(母音記号など。記号カタログでplacement:"after"を指定したもの)。
+  // ふりがな側は対象外(ルビ内の文字の後ろ、という概念は今回のスコープでは扱わない)。
+  const afterPointsByPos = useMemo(() => {
+    const map = {};
+    (points || []).forEach((pt) => {
+      if (pt.rubyId) return;
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      if (!def || def.placement !== "after") return;
       (map[pt.position] = map[pt.position] || []).push(pt);
     });
     return map;
@@ -590,36 +644,65 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       }, def.symbol);
     });
   }
+  // ★Phase9: 指定した1文字(pos = text[pos])の「後ろ」に表示する記号ノード(通常のテキストの流れに乗せる。上に重ねない)
+  function renderAfterSymbolsAt(pos) {
+    const list = afterPointsByPos[pos];
+    if (!list || list.length === 0) return null;
+    return list.map((pt) => {
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      const sym = displaySymbolFor(def, text[pos]); // ★Phase10: 自動判定タイプはここで子音を割り出す
+      if (!def || !sym) return null;
+      return E("span", {
+        key: pt.id, "data-annot-skip": "true", title: def.label,
+        style: { display: "inline-block", color: def.color, fontWeight: 700, marginLeft: 2 },
+      }, sym);
+    });
+  }
+  function hasAfterIn(s, e) {
+    for (let p = s; p < e; p++) if (afterPointsByPos[p]) return true;
+    return false;
+  }
   // ★Phase6: 指定した1文字(pos = text[pos])の真上に出す記号ノード(rtの中身)を作る
   function renderAboveSymbolsAt(pos) {
     const list = abovePointsByPos[pos];
     if (!list || list.length === 0) return null;
     return list.map((pt) => {
       const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
-      if (!def) return null;
+      const sym = displaySymbolFor(def, text[pos]); // ★Phase10: 自動判定タイプはここで子音を割り出す
+      if (!def || !sym) return null;
       return E("span", {
         key: pt.id, "data-annot-skip": "true", title: def.label,
         style: { display: "inline-block", color: def.color, fontWeight: 700, margin: "0 1px" },
-      }, def.symbol);
+      }, sym);
     });
   }
   // ★ふりがなの特定の1文字(rubyIdの文字列中のcharIdx番目)の真上に出す記号
-  function renderAboveRubySymbolsAt(rubyId, charIdx) {
+  function renderAboveRubySymbolsAt(rubyId, charIdx, rubyStr) {
     const list = abovePointsByRubyOffset[rubyId + ":" + charIdx];
     if (!list || list.length === 0) return null;
     return list.map((pt) => {
       const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
-      if (!def) return null;
+      const sym = displaySymbolFor(def, rubyStr ? rubyStr[charIdx] : ""); // ★Phase10: 自動判定タイプはここで子音を割り出す
+      if (!def || !sym) return null;
       return E("span", {
         key: pt.id, "data-annot-skip": "true", title: def.label,
         style: { display: "inline-block", color: def.color, fontWeight: 700, margin: "0 1px" },
-      }, def.symbol);
+      }, sym);
     });
   }
   function hasAboveIn(s, e) {
     for (let p = s; p < e; p++) if (abovePointsByPos[p]) return true;
     return false;
   }
+  // ★Phase10追加: 子音(自動判定)記号が付いている文字は、発音してしまわないよう見えなくする(透明にする。幅は保持)
+  function isAutoConsonantList(list) {
+    return (list || []).some((pt) => {
+      const def = (pointCatalog || []).find((pc) => pc.id === pt.typeId);
+      return !!(def && def.autoConsonant);
+    });
+  }
+  function hideBaseCharAt(pos) { return isAutoConsonantList(abovePointsByPos[pos]); }
+  function hideRubyCharAt(rubyId, charIdx) { return isAutoConsonantList(abovePointsByRubyOffset[rubyId + ":" + charIdx]); }
   // ★Phase6(修正): 文字の真上の記号は、入れ子のrubyだとブラウザによって再描画のタイミングでレイアウトが更新されず
   // 「データは登録されているのに表示上だけ現れない」ことがあったため、position:absoluteで確実に重ねる方式に変更。
   // baseNode(通常の文字、またはふりがな付きのruby)の上端よりさらに上に、記号を絶対配置で乗せる。
@@ -643,10 +726,10 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
     const out = [];
     let cur = runStart;
     for (let p = runStart; p < runEnd; p++) {
-      const syms = renderAboveRubySymbolsAt(rubyId, p);
+      const syms = renderAboveRubySymbolsAt(rubyId, p, rubyStr);
       if (!syms) continue;
       if (p > cur) out.push(E("span", { key: keyPrefix + "pre" + p, "data-ruby-id": rubyId, "data-ruby-base-offset": String(cur) }, rubyStr.slice(cur, p)));
-      const charSpan = E("span", { key: "c", "data-ruby-id": rubyId, "data-ruby-base-offset": String(p) }, rubyStr.slice(p, p + 1));
+      const charSpan = E("span", { key: "c", "data-ruby-id": rubyId, "data-ruby-base-offset": String(p), style: hideRubyCharAt(rubyId, p) ? { opacity: 0.25 } : undefined }, rubyStr.slice(p, p + 1));
       out.push(withAboveSymbols(keyPrefix + "ab" + p, charSpan, syms, { lineHeight: 1.2, verticalAlign: "baseline" }));
       cur = p + 1;
     }
@@ -723,24 +806,32 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
         } else {
           nodes.push(E("ruby", { key: `seg-${i}-${gi}` }, rubyChildren));
         }
+        // ★Phase9: このgsegの範囲内に「文字の後ろ」記号(母音記号など)があれば、ふりがな付き文字のすぐ後ろに続けて表示する
+        if (hasAfterIn(gseg.start, gseg.end)) {
+          const afterSyms = [];
+          for (let p = gseg.start; p < gseg.end; p++) { const s = renderAfterSymbolsAt(p); if (s) afterSyms.push.apply(afterSyms, s); }
+          nodes.push(E("span", { key: `seg-${i}-${gi}-after`, "data-annot-skip": "true" }, afterSyms));
+        }
       });
       const lastEnd = group[group.length - 1].end;
       nodes.push(E(React.Fragment, { key: "pt-" + lastEnd }, renderPointsAt(lastEnd))); // ルビ全体の外側との境目の記号は従来通り本文行
       i = j;
     } else {
       const { segStyle, title } = segStyleAndTitleOf(seg);
-      if (!hasAboveIn(seg.start, seg.end)) {
+      if (!hasAboveIn(seg.start, seg.end) && !hasAfterIn(seg.start, seg.end)) {
         nodes.push(E("span", { key: "seg-" + i, title, style: segStyle }, seg.text));
       } else {
-        // ★区間内に「文字の真上」記号があるので、対象の文字だけ真上に記号を重ねて出す(ふりがなが無い文字の場合)
+        // ★区間内に「文字の真上」または「文字の後ろ」の記号があるので、対象の文字だけ分けて処理する(ふりがなが無い文字の場合)
         const runs = [];
         let cursor = seg.start;
         for (let p = seg.start; p < seg.end; p++) {
-          if (!abovePointsByPos[p]) continue;
+          const aboveSyms = renderAboveSymbolsAt(p);
+          const afterSyms = renderAfterSymbolsAt(p);
+          if (!aboveSyms && !afterSyms) continue;
           if (p > cursor) runs.push(E("span", { key: "pre" + p, title, style: segStyle }, text.slice(cursor, p)));
-          const syms = renderAboveSymbolsAt(p);
-          const charNode = E("span", { key: "b", title, style: segStyle }, text.slice(p, p + 1));
-          runs.push(withAboveSymbols("ab" + p, charNode, syms, { lineHeight: 1.2, verticalAlign: "baseline" }));
+          const charNode = E("span", { key: "b", title, style: hideBaseCharAt(p) ? Object.assign({}, segStyle, { opacity: 0.25 }) : segStyle }, text.slice(p, p + 1));
+          runs.push(aboveSyms ? withAboveSymbols("ab" + p, charNode, aboveSyms, { lineHeight: 1.2, verticalAlign: "baseline" }) : E("span", { key: "ab" + p }, charNode));
+          if (afterSyms) runs.push(E("span", { key: "af" + p, "data-annot-skip": "true" }, afterSyms)); // ★Phase9
           cursor = p + 1;
         }
         if (cursor < seg.end) runs.push(E("span", { key: "post", title, style: segStyle }, text.slice(cursor, seg.end)));
@@ -796,6 +887,7 @@ function Legend({ parts, marks, points, partCatalog, markCatalog, pointCatalog }
           E("span", { key: "s", style: { color: pt.color, fontWeight: 700 } }, pt.symbol),
           pt.label,
           pt.placement === "above" && E("span", { key: "abv", title: "文字の真上に配置", style: { fontSize: 9, color: C.brassDim } }, "▲上"),
+          pt.placement === "after" && E("span", { key: "aft", title: "文字の後ろに配置", style: { fontSize: 9, color: C.brassDim } }, "▶後"),
         ]);
       })
     )
@@ -948,8 +1040,15 @@ function CatalogModal({ title, items, hasSymbol, hasPlacement, onClose, onAdd, o
         E("span", { style: { fontFamily: FONT_D, color: C.paperText, fontSize: 16 } }, title),
         E("button", { onClick: onClose, style: { background: "none", border: "none", cursor: "pointer", color: C.paperTextDim, fontSize: 16 } }, "×")),
       E("div", { key: "list", style: { display: "flex", flexDirection: "column", gap: 8 } }, orderedItems.map((it) => {
-        const placement = it.placement === "above" ? "above" : "between"; // ★Phase6: 未指定は従来通り「文字と文字の間」扱い
+        const placement = (it.placement === "above" || it.placement === "after") ? it.placement : "between"; // 未指定は従来通り「文字と文字の間」扱い
         const isDragging = dragId === it.id;
+        function placementBtn(value, label) {
+          return E("button", {
+            key: value,
+            onClick: () => { if (placement !== value && !confirm(`配置を「${label}」に変更しますか?\nすでにこの記号を使っている歌詞があると、表示位置がずれる場合があります。`)) return; onUpdate(it.id, { placement: value }); },
+            style: { fontSize: 10, padding: "2px 8px", borderRadius: 10, cursor: "pointer", fontFamily: FONT_M, background: placement === value ? C.brass : "transparent", color: placement === value ? C.ink : C.paperTextDim, border: `1px solid ${placement === value ? C.brass : C.inkBorder}` },
+          }, label);
+        }
         return E("div", { key: it.id, "data-cat-id": it.id, style: { display: "flex", flexDirection: "column", gap: 6, background: C.ink, border: `1px solid ${isDragging ? C.brass : C.inkBorder}`, borderRadius: 4, padding: "6px 8px", opacity: isDragging ? 0.55 : 1 } }, [
           E("div", { key: "row1", style: { display: "flex", alignItems: "center", gap: 8 } }, [
             E("span", {
@@ -961,14 +1060,16 @@ function CatalogModal({ title, items, hasSymbol, hasPlacement, onClose, onAdd, o
               style: { cursor: "grab", color: C.paperTextDim, fontSize: 16, padding: "0 2px", touchAction: "none", userSelect: "none" },
             }, "⠿"),
             E("input", { key: "c", type: "color", value: it.color, onChange: (ev) => onUpdate(it.id, { color: ev.target.value }), style: { width: 28, height: 28, border: "none", background: "none", cursor: "pointer", padding: 0 } }),
-            hasSymbol && E("input", { key: "s", value: it.symbol || "", onChange: (ev) => onUpdate(it.id, { symbol: ev.target.value.slice(0, 4) }), style: { width: 44, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_M, fontSize: 12, padding: "4px 6px", textAlign: "center" } }),
+            hasSymbol && E("input", { key: "s", value: it.symbol || "", title: it.autoConsonant ? "この文字はツールバーのボタン表示専用です(実際の表示はK/S/T等が自動で決まります)" : undefined, onChange: (ev) => onUpdate(it.id, { symbol: ev.target.value.slice(0, 4) }), style: { width: 44, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_M, fontSize: 12, padding: "4px 6px", textAlign: "center" } }),
             E("input", { key: "l", value: it.label, onChange: (ev) => onUpdate(it.id, { label: ev.target.value }), style: { flex: 1, background: C.inkPanel, border: `1px solid ${C.inkBorder}`, borderRadius: 3, color: C.paperText, fontFamily: FONT_B, fontSize: 13, padding: "5px 8px" } }),
+            it.autoConsonant && E("span", { key: "auto", title: "K/S/T等を文字から自動判定して表示します", style: { fontSize: 9, color: C.brassDim, whiteSpace: "nowrap" } }, "自動判定"),
             E("button", { key: "d", onClick: () => onDelete(it.id), title: "削除", style: { background: "none", border: "none", cursor: "pointer", color: C.waxDim } }, "✕"),
           ]),
-          hasPlacement && E("div", { key: "row2", style: { display: "flex", alignItems: "center", gap: 6, paddingLeft: 36 } }, [
+          hasPlacement && E("div", { key: "row2", style: { display: "flex", alignItems: "center", gap: 6, paddingLeft: 36, flexWrap: "wrap" } }, [
             E("span", { key: "lbl", style: { fontSize: 10, color: C.paperTextDim, fontFamily: FONT_M } }, "配置:"),
-            E("button", { key: "btw", onClick: () => { if (placement !== "between" && !confirm("配置を「文字と文字の間」に変更しますか?\nすでにこの記号を使っている歌詞があると、表示位置がずれる場合があります。")) return; onUpdate(it.id, { placement: "between" }); }, style: { fontSize: 10, padding: "2px 8px", borderRadius: 10, cursor: "pointer", fontFamily: FONT_M, background: placement === "between" ? C.brass : "transparent", color: placement === "between" ? C.ink : C.paperTextDim, border: `1px solid ${placement === "between" ? C.brass : C.inkBorder}` } }, "文字と文字の間"),
-            E("button", { key: "abv", onClick: () => { if (placement !== "above" && !confirm("配置を「文字の真上」に変更しますか?\nすでにこの記号を使っている歌詞があると、表示位置がずれる場合があります。")) return; onUpdate(it.id, { placement: "above" }); }, style: { fontSize: 10, padding: "2px 8px", borderRadius: 10, cursor: "pointer", fontFamily: FONT_M, background: placement === "above" ? C.brass : "transparent", color: placement === "above" ? C.ink : C.paperTextDim, border: `1px solid ${placement === "above" ? C.brass : C.inkBorder}` } }, "文字の真上(ルビの上にも表示)"),
+            placementBtn("between", "文字と文字の間"),
+            placementBtn("above", "文字の真上(ルビの上にも表示)"),
+            placementBtn("after", "文字の後ろ"), // ★Phase9
           ]),
         ]);
       })),
@@ -1125,7 +1226,7 @@ function LyricsArchive() {
     refreshIndex();
     loadCatalog("part-catalog", DEFAULT_PART_CATALOG).then(setPartCatalog);
     loadCatalog("mark-catalog", DEFAULT_MARK_CATALOG).then(setMarkCatalog);
-    loadCatalog("point-catalog", DEFAULT_POINT_CATALOG).then(setPointCatalog);
+    loadPointCatalogWithMigration().then(setPointCatalog); // ★Phase9
     loadCatalog("reaction-catalog", DEFAULT_REACTION_TYPES).then(setReactionTypes);
     const unsub = fbAuth.onAuthStateChanged(async (fbUser) => {
       if (!fbUser) { setUser(null); setNickname(""); setAuthLoading(false); return; }
@@ -1196,7 +1297,7 @@ function LyricsArchive() {
       await refreshIndex();
       loadCatalog("part-catalog", DEFAULT_PART_CATALOG).then(setPartCatalog);
       loadCatalog("mark-catalog", DEFAULT_MARK_CATALOG).then(setMarkCatalog);
-      loadCatalog("point-catalog", DEFAULT_POINT_CATALOG).then(setPointCatalog);
+      loadPointCatalogWithMigration().then(setPointCatalog); // ★Phase9
       loadCatalog("reaction-catalog", DEFAULT_REACTION_TYPES).then(setReactionTypes);
     } catch (e) {
       setMigrateMsg("⚠ 移行中にエラーが発生しました: " + e.message);
@@ -1478,31 +1579,38 @@ function LyricsArchive() {
       const clientY = ev.clientY != null ? ev.clientY : (ev.changedTouches && ev.changedTouches[0] && ev.changedTouches[0].clientY);
       const stampDef = (pointCatalog || []).find((pc) => pc.id === stampType);
       const isAbove = !!(stampDef && stampDef.placement === "above"); // ★Phase6
+      const isAfter = !!(stampDef && stampDef.placement === "after"); // ★Phase9
       setTimeout(() => {
         const sel = window.getSelection();
         if (sel && !sel.isCollapsed) return; // ドラッグで範囲選択された場合はスタンプを置かない
         if (clientX == null || clientY == null) return;
         // ★ふりがな部分をタップした場合: 「文字と文字の間」タイプは従来通りその隙間に、
-        // 「文字の真上」タイプはそのかな1文字の真上に配置する。
-        const rubyTarget = getRubyClickTarget(annotateRef.current, clientX, clientY);
-        if (rubyTarget) {
-          if (isAbove) {
-            const ruby = draftRubies.find((r) => r.id === rubyTarget.rubyId);
-            const rubyLen = ruby ? (ruby.text || "").length : 0;
-            if (rubyLen === 0) return;
-            const charIdx = Math.min(rubyTarget.rubyOffset, rubyLen - 1); // ギャップ位置→かな文字位置
-            placeRubyStamp(rubyTarget.rubyId, charIdx, stampType);
-          } else {
-            placeRubyStamp(rubyTarget.rubyId, rubyTarget.rubyOffset, stampType);
+        // 「文字の真上」タイプはそのかな1文字の真上に配置する。「文字の後ろ」タイプはふりがな側は対象外(本文の文字のみ)。
+        if (!isAfter) {
+          const rubyTarget = getRubyClickTarget(annotateRef.current, clientX, clientY);
+          if (rubyTarget) {
+            if (isAbove) {
+              const ruby = draftRubies.find((r) => r.id === rubyTarget.rubyId);
+              const rubyLen = ruby ? (ruby.text || "").length : 0;
+              if (rubyLen === 0) return;
+              const charIdx = Math.min(rubyTarget.rubyOffset, rubyLen - 1); // ギャップ位置→かな文字位置
+              // ★Phase10: 自動判定タイプは、対応する子音が無い文字(母音のみ・濁音等)には置かない
+              if (stampDef.autoConsonant && !consonantOf(ruby.text[charIdx])) return;
+              placeRubyStamp(rubyTarget.rubyId, charIdx, stampType);
+            } else {
+              placeRubyStamp(rubyTarget.rubyId, rubyTarget.rubyOffset, stampType);
+            }
+            return;
           }
-          return;
         }
         const pos = getClickOffset(annotateRef.current, clientX, clientY);
         if (pos == null) return;
-        if (isAbove) {
+        if (isAbove || isAfter) {
           const text = selectedSong ? selectedSong.lyrics || "" : "";
           if (text.length === 0) return;
-          const charIndex = Math.min(pos, text.length - 1); // ギャップ位置→文字位置(その文字の真上に置く)
+          const charIndex = Math.min(pos, text.length - 1); // ギャップ位置→文字位置(その文字の真上/後ろに置く)
+          // ★Phase10: 自動判定タイプは、対応する子音が無い文字には置かない
+          if (stampDef.autoConsonant && !consonantOf(text[charIndex])) return;
           placeStamp(charIndex, stampType);
         } else {
           placeStamp(pos, stampType);
