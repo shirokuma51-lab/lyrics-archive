@@ -740,12 +740,13 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
   const nodes = [E(React.Fragment, { key: "pt-0" }, renderPointsAt(0))];
   // ★パート重ね表示: 1つの文字範囲に複数のパートが重なっている場合、下線を「上・真ん中・下」の
   // 最大3段に積み重ねて表示する(1つしか無ければ「上」の段のみ表示される)。
-  // 内側のspanのborder-bottomほど文字に近い位置(=上の段)に出て、外側へ包むほど下の段になる。
-  // border-bottomはinline要素でも行の折り返しごとに正しく引かれるため、この「入れ子span」方式にしている
-  // (box-shadowで代用すると要素の背の高さ分の帯になってしまい、細い線にならないため不採用)。
+  // 以前は入れ子spanのborder-bottom+padding-bottomの積み上げで実装していたが、行の折り返しをまたぐ場合などに
+  // 3段目(一番外側)が描画されないことがあったため、withAboveSymbolsと同じ「position:absoluteで確実に重ねる」
+  // 方式に変更した。これは1文字ごとに position:relative の枠を作り、その中に下線バーを絶対配置で重ねる。
   const MAX_STACKED_UNDERLINES = 3;
   const UNDERLINE_THICKNESS = 2;
-  const UNDERLINE_GAP = 3; // 段と段の間の余白
+  const UNDERLINE_BASE_OFFSET = 3; // 文字の下端から1段目の下線までの余白
+  const UNDERLINE_GAP = 4; // 下線どうしの間の隙間(色と色の間の余白)
   function segStyleAndTitleOf(seg) {
     const partDefs = (seg.partsHere || [])
       .map((p) => (partCatalog || []).find((pc) => pc.id === p.colorId))
@@ -754,25 +755,30 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
     const markDefs = (seg.marksHere || []).map((m) => (markCatalog || []).find((mc) => mc.id === m.typeId)).filter(Boolean);
     const backgroundColor = markDefs.length ? `${markDefs[0].color}4D` : "transparent";
     const title = markDefs.length ? markDefs.map((m) => m.label).join(" / ") : undefined;
-    // node(文字そのもの)を、パートの数だけ入れ子のspanで包んで積み重ね下線を作る
-    function wrap(key, node, extraInnerStyle) {
-      let out = E("span", {
-        key: "u-in",
-        style: Object.assign({ backgroundColor, borderRadius: 2 }, extraInnerStyle),
-        title,
-      }, node);
-      for (let li = 0; li < partDefs.length; li++) {
-        out = E("span", {
-          key: "u" + li,
-          style: {
-            borderBottom: `${UNDERLINE_THICKNESS}px solid ${partDefs[li].color}`,
-            paddingBottom: li === 0 ? 1 : UNDERLINE_GAP,
-          },
-        }, out);
-      }
-      return E(React.Fragment, { key }, out);
+    const hasUnderline = partDefs.length > 0;
+    // 下線が無い区間用: 複数文字をまとめて1つのspanで返す(従来通りの軽量な描画)
+    function wrapRun(key, textStr, extraInnerStyle) {
+      return E("span", { key, title, style: Object.assign({ backgroundColor, borderRadius: 2 }, extraInnerStyle) }, textStr);
     }
-    return { wrap, title };
+    // 下線がある区間用: 1文字ずつ position:relative の枠に入れ、下線バーを絶対配置で重ねる
+    // (行の折り返しをまたいでも1文字単位なので必ず正しい位置に表示される)
+    function wrapChar(key, ch, extraInnerStyle) {
+      const inner = E("span", {
+        key: "u-in", title,
+        style: Object.assign({ backgroundColor, borderRadius: 2 }, extraInnerStyle),
+      }, ch);
+      if (!hasUnderline) return E(React.Fragment, { key }, inner);
+      const bars = partDefs.map((pd, li) => E("span", {
+        key: "ul" + li, "data-annot-skip": "true",
+        style: {
+          position: "absolute", left: 0, right: 0,
+          bottom: -(UNDERLINE_BASE_OFFSET + li * (UNDERLINE_THICKNESS + UNDERLINE_GAP)),
+          height: UNDERLINE_THICKNESS, borderRadius: 1, background: pd.color, pointerEvents: "none",
+        },
+      }));
+      return E("span", { key, style: { position: "relative", display: "inline-block" } }, [inner].concat(bars));
+    }
+    return { wrapRun, wrapChar, hasUnderline, title };
   }
   // ★ルビの範囲内(文字と文字の間)に記号(スタンプ)を挿入した場合、その記号を「本文の行」ではなく
   // 「ふりがなの行」の方に差し込んで表示する(例: 本[記号]棚 ではなく ほん[記号]だな のように上段に出す)。
@@ -797,7 +803,7 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       const boundaries = [0];
       group.forEach((gseg) => { runningBase += gseg.text.length; boundaries.push(Math.round((runningBase / totalBaseLen) * rubyStr.length)); });
       group.forEach((gseg, gi) => {
-        const { wrap } = segStyleAndTitleOf(gseg);
+        const { wrapRun, wrapChar, hasUnderline } = segStyleAndTitleOf(gseg);
         const segStart = boundaries[gi], segEnd = boundaries[gi + 1];
         const innerOffsets = Array.from(new Set(
           (points || []).filter((pt) => {
@@ -818,8 +824,11 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
         const isLastInGroup = gi === group.length - 1;
         const midSymbols = !isLastInGroup ? renderPointsAt(gseg.end) : null; // ルビの内側(文字と文字の区切り)にある記号→ふりがな行へ
         rtChildren.push(midSymbols ? E("span", { key: "sym", "data-annot-skip": "true", style: { margin: "0 1px" } }, midSymbols) : null);
+        const baseChars = [];
+        for (let ci = 0; ci < gseg.text.length; ci++) baseChars.push(wrapChar("bc" + ci, gseg.text[ci]));
+        const baseNode = hasUnderline ? E("span", { key: "base" }, baseChars) : wrapRun("base", gseg.text);
         const rubyChildren = [
-          wrap("base", gseg.text),
+          baseNode,
           E("rt", { key: "rt", "data-annot-skip": "true", style: { fontFamily: FONT_M, fontSize: 10, fontWeight: 500, color: "#8A6D3C", userSelect: "none" } }, rtChildren),
         ];
         const rubyNode = E("ruby", { key: "ruby" }, rubyChildren);
@@ -842,9 +851,20 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
       nodes.push(E(React.Fragment, { key: "pt-" + lastEnd }, renderPointsAt(lastEnd))); // ルビ全体の外側との境目の記号は従来通り本文行
       i = j;
     } else {
-      const { wrap } = segStyleAndTitleOf(seg);
-      if (!hasAboveIn(seg.start, seg.end) && !hasAfterIn(seg.start, seg.end)) {
-        nodes.push(wrap("seg-" + i, seg.text));
+      const { wrapRun, wrapChar, hasUnderline } = segStyleAndTitleOf(seg);
+      if (hasUnderline) {
+        // ★下線がある区間は1文字ずつ処理する(絶対配置の下線バーを正しい位置に出すため)
+        const runs = [];
+        for (let p = seg.start; p < seg.end; p++) {
+          const aboveSyms = renderAboveSymbolsAt(p);
+          const afterSyms = renderAfterSymbolsAt(p);
+          const charNode = wrapChar("c" + p, text.slice(p, p + 1), hideBaseCharAt(p) ? { opacity: 0.25 } : undefined);
+          runs.push(aboveSyms ? withAboveSymbols("ab" + p, charNode, aboveSyms, { lineHeight: 1.2, verticalAlign: "baseline" }) : E("span", { key: "ab" + p }, charNode));
+          if (afterSyms) runs.push(E("span", { key: "af" + p, "data-annot-skip": "true" }, afterSyms)); // ★Phase9
+        }
+        nodes.push(E(React.Fragment, { key: "seg-" + i }, runs));
+      } else if (!hasAboveIn(seg.start, seg.end) && !hasAfterIn(seg.start, seg.end)) {
+        nodes.push(wrapRun("seg-" + i, seg.text));
       } else {
         // ★区間内に「文字の真上」または「文字の後ろ」の記号があるので、対象の文字だけ分けて処理する(ふりがなが無い文字の場合)
         const runs = [];
@@ -853,13 +873,13 @@ function LyricsRenderer({ text, parts, marks, points, rubies, partCatalog, markC
           const aboveSyms = renderAboveSymbolsAt(p);
           const afterSyms = renderAfterSymbolsAt(p);
           if (!aboveSyms && !afterSyms) continue;
-          if (p > cursor) runs.push(wrap("pre" + p, text.slice(cursor, p)));
-          const charNode = wrap("b" + p, text.slice(p, p + 1), hideBaseCharAt(p) ? { opacity: 0.25 } : undefined);
+          if (p > cursor) runs.push(wrapRun("pre" + p, text.slice(cursor, p)));
+          const charNode = wrapRun("b" + p, text.slice(p, p + 1), hideBaseCharAt(p) ? { opacity: 0.25 } : undefined);
           runs.push(aboveSyms ? withAboveSymbols("ab" + p, charNode, aboveSyms, { lineHeight: 1.2, verticalAlign: "baseline" }) : E("span", { key: "ab" + p }, charNode));
           if (afterSyms) runs.push(E("span", { key: "af" + p, "data-annot-skip": "true" }, afterSyms)); // ★Phase9
           cursor = p + 1;
         }
-        if (cursor < seg.end) runs.push(wrap("post", text.slice(cursor, seg.end)));
+        if (cursor < seg.end) runs.push(wrapRun("post", text.slice(cursor, seg.end)));
         nodes.push(E(React.Fragment, { key: "seg-" + i }, runs));
       }
       nodes.push(E(React.Fragment, { key: "pt-" + seg.end }, renderPointsAt(seg.end)));
